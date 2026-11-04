@@ -23,49 +23,62 @@ TZ = timezone(timedelta(hours=8))
 
 # 宽基 / 风格指数
 IDX = {
-    "hs300": ("1.000300", "沪深300"),
-    "div": ("1.000922", "中证红利"),
-    "all": ("1.000985", "中证全指"),
+    "hs300": ("000300", "沪深300"),
+    "div": ("000922", "中证红利"),
+    "all": ("000985", "中证全指"),
 }
-# 进攻侧观察池（ETF 作板块代理）
+# 板块代理统一用中证/国证指数（官方成交额 + PE，口径稳定）
 SECTORS = [
-    ("1.588000", "科创50"),
-    ("1.512480", "半导体"),
-    ("1.515000", "科技"),
-    ("1.512660", "军工"),
-    ("0.159992", "创新药"),
-    ("1.516160", "新能源"),
-    ("1.512400", "有色"),
-    ("1.512880", "证券"),
-    ("1.512690", "白酒"),
-    ("1.512800", "银行"),
-    ("1.515180", "红利ETF"),
-    ("1.510300", "300ETF"),
+    ("000935", "信息技术"), ("H30184", "半导体"), ("000688", "科创50"),
+    ("399967", "军工"), ("000933", "医药"), ("000932", "主要消费"),
+    ("000928", "能源"), ("000930", "工业"), ("000934", "金融"),
+    ("000922", "中证红利"), ("000300", "沪深300"),
 ]
+TENCENT = {"000300": "sh000300", "000922": "sh000922", "000985": "sh000985",
+           "000688": "sh000688", "399967": "sz399967", "000935": "sh000935",
+           "H30184": "shH30184"}
 
 
-def _fetch_em(secid, lmt):
-    url = (
-        "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-        f"?secid={secid}&klt=101&fqt=1&end=20500101&lmt={lmt}"
-        "&fields1=f1,f2,f3,f4,f5,f6"
-        "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-    )
-    req = urllib.request.Request(url, headers=HDR)
-    with urllib.request.urlopen(req, timeout=12) as r:
-        obj = json.loads(r.read().decode("utf-8"))
-    ks = ((obj.get("data") or {}).get("klines")) or []
+_LAST = [0.0]
+
+
+def _cs_get(url):
+    """中证官网限速：请求间隔 0.6s，失败退避重试 3 次。"""
+    for i in range(3):
+        gap = time.time() - _LAST[0]
+        if gap < 0.6:
+            time.sleep(0.6 - gap)
+        _LAST[0] = time.time()
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": HDR["User-Agent"],
+                "Referer": "https://www.csindex.com.cn/"})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception:
+            time.sleep(1.2 * (i + 1))
+    raise RuntimeError("csindex 请求失败: " + url[:80])
+
+
+def _fetch_cs(code, days=1500):
+    start = (datetime.now(TZ) - timedelta(days=days)).strftime("%Y%m%d")
+    end = datetime.now(TZ).strftime("%Y%m%d")
+    url = ("https://www.csindex.com.cn/csindex-home/perf/index-perf"
+           f"?indexCode={code}&startDate={start}&endDate={end}")
+    rows = _cs_get(url).get("data") or []
     out = []
-    for line in ks:
-        p = line.split(",")
-        out.append({"d": p[0], "close": float(p[2]), "vol": float(p[5]),
-                    "amt": float(p[6]) if len(p) > 6 and p[6] not in ("", "-") else 0.0})
+    for x in rows:
+        try:
+            amt = float(x.get("tradingValue") or 0)
+            out.append({"d": str(x["tradeDate"]), "close": float(x["close"]),
+                        "vol": amt, "amt": amt})
+        except Exception:
+            continue
     return out
 
 
-def _fetch_sina(secid, lmt):
-    """备用源：腾讯行情（index 用 day，ETF 用 qfqday），含成交量。"""
-    sym = SINA.get(secid)
+def _fetch_tencent(code, lmt):
+    sym = TENCENT.get(code)
     if not sym:
         return []
     url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
@@ -78,30 +91,36 @@ def _fetch_sina(secid, lmt):
     out = []
     for x in ks[-lmt:]:
         v = float(x[5]) if len(x) > 5 and x[5] not in ("", "-") else 0.0
-        out.append({"d": x[0], "close": float(x[2]), "vol": v, "amt": v})
+        out.append({"d": x[0].replace("-", ""), "close": float(x[2]), "vol": v, "amt": v})
     return out
 
 
-def fetch_kline(secid, lmt=520):
-    last = None
-    for attempt in range(2):
-        try:
-            out = _fetch_em(secid, lmt)
-            if out:
-                return out
-        except Exception as e:  # noqa
-            last = e
-        time.sleep(0.4)
-    time.sleep(0.4)
-    try:
-        out = _fetch_sina(secid, lmt)
-        if out:
-            USED_SINA.append(secid)
-            return out
-    except Exception as e:  # noqa
-        last = e
-    if last:
-        print(f"[warn] {secid} 失败: {last}")
+def fetch_index_perf(code, start="20170101"):
+    """返回 [(YYYY-MM-DD, 市盈率), ...]（中证官网字段 peg 实为 PE）。"""
+    end = datetime.now(TZ).strftime("%Y%m%d")
+    url = ("https://www.csindex.com.cn/csindex-home/perf/index-perf"
+           f"?indexCode={code}&startDate={start}&endDate={end}")
+    rows = _cs_get(url).get("data") or []
+    out = []
+    for x in rows:
+        pe = x.get("peg")
+        d = str(x.get("tradeDate") or "")
+        if pe and len(d) == 8:
+            out.append((f"{d[:4]}-{d[4:6]}-{d[6:8]}", float(pe)))
+    return out
+
+
+def fetch_kline(code, lmt=520):
+    for fn in (_fetch_cs, _fetch_tencent):
+        for attempt in range(2):
+            try:
+                out = fn(code, lmt) if fn is _fetch_tencent else fn(code)
+                if len(out) >= 60:
+                    return out[-lmt:]
+            except Exception:
+                pass
+            time.sleep(1.0)
+    print(f"[warn] {code} 取数失败")
     return []
 
 
@@ -120,21 +139,8 @@ def pctile(arr, v):
 def main():
     data = {}
     # 统一优先腾讯源：成交量口径固定，避免东财/腾讯来回切导致量能分位跳变
-    for k, (secid, name) in IDX.items():
-        try:
-            data[k] = _fetch_sina(secid, 520)
-        except Exception:  # noqa
-            data[k] = []
-    if all(len(v) >= 200 for v in data.values()):
-        USED_SINA.append("tx")
-    else:
-        for k, (secid, name) in IDX.items():
-            try:
-                data[k] = _fetch_em(secid, 520)
-            except Exception as e:  # noqa
-                print(f"[warn] {name} 备用源失败: {e}")
-                data[k] = []
-        USED_SINA.append("em")
+    for k, (code, name) in IDX.items():
+        data[k] = fetch_kline(code, 520)
     hs, dv, al = data["hs300"], data["div"], data["all"]
     if not hs or not dv:
         raise SystemExit("核心指数取数失败，稍后重试")
@@ -200,6 +206,43 @@ def main():
         regime, tone = "中间态", "mix"
     bear = last < ma250
 
+    # ---- 估值：中证全指 PE（含银行），2017 至今 ----
+    val = {"pe": None}
+    try:
+        series = fetch_index_perf("000985")
+    except Exception as e:  # noqa
+        print(f"[warn] 估值数据失败: {e}")
+        series = []
+    if len(series) > 200:
+        pe = [x[1] for x in series]
+        mean = sum(pe) / len(pe)
+        sd = (sum((x - mean) ** 2 for x in pe) / len(pe)) ** 0.5
+        cur = pe[-1]
+        weekly = series[::5]
+        if weekly[-1][0] != series[-1][0]:
+            weekly.append(series[-1])
+        val = {"pe": round(cur, 2), "mean": round(mean, 2),
+               "hi": round(mean + sd, 2), "lo": round(mean - sd, 2),
+               "pct": pctile(pe, cur), "start": series[0][0], "n": len(series),
+               "series": [round(x[1], 2) for x in weekly]}
+    if not val.get("pe"):
+        try:
+            with open("site/data.json", encoding="utf-8") as f:
+                prev = (json.load(f) or {}).get("val") or {}
+            if prev.get("pe"):
+                val = prev
+                print("[warn] 估值取数失败，沿用上次数据")
+        except Exception:
+            pass
+    for code, key in (("000300", "pe300"), ("000934", "pe_bank")):
+        val[key] = None
+        try:
+            vv = fetch_index_perf(code)
+            if vv:
+                val[key] = round(vv[-1][1], 2)
+        except Exception as e:  # noqa
+            print(f"[warn] {code} 估值失败: {e}")
+
     payload = {
         "updated": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
         "date": hs[-1]["d"],
@@ -212,13 +255,14 @@ def main():
         "rs_above": rs_now > rs_ma60,
         "rs_5d": rs_5d, "rs_20d": rs_20d,
         "share": share, "share_5d": share_5d,
-        "share_unit": "成交量" if USED_SINA else "成交额",
+        "share_unit": "成交额",
         "regime": regime, "tone": tone, "bear": bear,
         "sectors": rows,
-        "src_note": "（部分数据走备用源：成交占比按成交量计）" if USED_SINA else "",
+        "src_note": "",
         "rs_series": [round(x, 4) for x in rs[-120:]],
         "rs_ma_series": [round(x, 4) for x in [ma(rs[:i + 1], 60) or rs[i] for i in range(len(rs) - 120, len(rs))]],
         "dates": [x["d"][5:] for x in dv[-120:]],
+        "val": val,
     }
     os.makedirs("site", exist_ok=True)
     with open("site/data.json", "w", encoding="utf-8") as f:
@@ -241,11 +285,56 @@ def svg_path(vals, w=560, h=120):
     return d
 
 
+def render_val(v):
+    if not v.get("pe"):
+        return ""
+    vals = v["series"]
+    lo = min(min(vals), v["lo"])
+    hi = max(max(vals), v["hi"])
+    rng = (hi - lo) or 1
+    W, H, PAD = 1000.0, 220.0, 26.0
+
+    def yy(x):
+        return round(H - PAD - (x - lo) / rng * (H - 2 * PAD), 1)
+
+    step = W / max(len(vals) - 1, 1)
+    d = "M" + " L".join(f"{round(i * step, 1)},{yy(x)}" for i, x in enumerate(vals))
+    cur = v["pe"]
+    if cur >= v["hi"]:
+        tone, verdict = "bad", "偏贵：已接近/超过高估线，红利以外的仓位要想清楚再上"
+    elif cur <= v["lo"]:
+        tone, verdict = "good", "偏便宜：接近低估线，是分批加的区间"
+    else:
+        tone, verdict = "warn", "中性：不便宜也不贵，按各自纪律走"
+    return f"""<h2>市场估值 · 中证全指市盈率（{v['start']} 至今）</h2>
+<div class="card" style="padding:14px 18px">
+<svg viewBox="0 0 1000 220" preserveAspectRatio="none" style="height:210px;width:100%">
+<path d="{d}" fill="none" stroke="#58a6ff" stroke-width="1.6"/>
+<line x1="0" y1="{yy(v['hi'])}" x2="1000" y2="{yy(v['hi'])}" stroke="#ff6b6b" stroke-width="1.2" stroke-dasharray="7 5"/>
+<line x1="0" y1="{yy(v['mean'])}" x2="1000" y2="{yy(v['mean'])}" stroke="#f0b429" stroke-width="1.2" stroke-dasharray="7 5"/>
+<line x1="0" y1="{yy(v['lo'])}" x2="1000" y2="{yy(v['lo'])}" stroke="#2fd47a" stroke-width="1.2" stroke-dasharray="7 5"/>
+<circle cx="1000" cy="{yy(cur)}" r="4" fill="#58a6ff"/>
+<text x="10" y="{yy(v['hi']) - 8}" fill="#ff6b6b" font-size="13">高估线 {v['hi']}</text>
+<text x="10" y="{yy(v['mean']) + 18}" fill="#f0b429" font-size="13">均值 {v['mean']}</text>
+<text x="10" y="{yy(v['lo']) + 20}" fill="#2fd47a" font-size="13">低估线 {v['lo']}</text>
+</svg>
+<div class="sub">蓝线=中证全指市盈率（含银行，官方口径）· 红=均值+1σ · 黄=均值 · 绿=均值−1σ · 共 {v['n']} 个交易日</div>
+</div>
+<div class="grid">
+  <div class="card"><div class="k">当前市盈率</div><div class="v {tone}">{v['pe']}</div></div>
+  <div class="card"><div class="k">历史分位（2017 至今）</div><div class="v">{v['pct']}%</div></div>
+  <div class="card"><div class="k">沪深300 / 中证金融 PE</div><div class="v" style="font-size:20px">{v.get('pe300') or '-'} / {v.get('pe_bank') or '-'}</div></div>
+</div>
+<div class="verdict">{verdict}</div>
+"""
+
+
 def render(p):
     tone = p["tone"]
     lam = {"def": "#2fd47a", "off": "#ff6b6b", "mix": "#f0b429"}[tone]
     label = {"def": "红利 / 防御占优", "off": "进攻板块占优", "mix": "方向不明 · 降仓观望"}[tone]
     rs_d = svg_path(p["rs_series"])
+    val_html = render_val(p.get("val") or {})
     ma_d = svg_path(p["rs_ma_series"])
     lo = min(p["rs_series"]); hi = max(p["rs_series"])
     sec_html = ""
@@ -315,7 +404,7 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 <div class="card">
 <table><tr><th>#</th><th>板块</th><th>20日超额</th><th>5日超额</th><th>60日位置</th></tr>{sec_html}</table>
 </div>
-<div class="foot">口径：量能分位=20日均额在过去一年分布中的位置；相对强弱=中证红利收盘/沪深300收盘；成交占比=中证红利成交额/中证全指成交额。ETF 作板块代理，存在跟踪误差。{p['src_note']}</div>
+{val_html}<div class="foot">口径：量能分位=20日均额在过去一年分布中的位置；相对强弱=中证红利收盘/沪深300收盘；成交占比=中证红利成交额/中证全指成交额。ETF 作板块代理，存在跟踪误差。{p['src_note']}</div>
 </div></body></html>"""
 
 
