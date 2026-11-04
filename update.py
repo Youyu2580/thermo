@@ -407,7 +407,7 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 <div class="card">
 <table><tr><th>#</th><th>板块</th><th>20日超额</th><th>5日超额</th><th>60日位置</th></tr>{sec_html}</table>
 </div>
-{val_html}<div class="foot">口径：量能分位=20日均额在过去一年分布中的位置；相对强弱=中证红利收盘/沪深300收盘；成交占比=中证红利成交额/中证全指成交额。ETF 作板块代理，存在跟踪误差。{p['src_note']}</div>
+{val_html}<div class="foot">口径：量能分位=20日均成交额在过去一年分布中的位置；相对强弱=中证红利收盘/沪深300收盘；成交占比=中证红利成交额/中证全指成交额；板块以中证/国证行业指数代理。数据源：中证指数官网（指数行情与市盈率）。{p['src_note']}</div>
 </div></body></html>"""
 
 
