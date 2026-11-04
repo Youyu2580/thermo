@@ -309,6 +309,8 @@ def render_val(v):
         tone, verdict = "good", "偏便宜：接近低估线，是分批加的区间"
     else:
         tone, verdict = "warn", "中性：不便宜也不贵，按各自纪律走"
+    pct = v["pct"]
+    coef = 0.5 if pct >= 80 else (0.75 if pct >= 60 else (1.25 if pct <= 20 else 1.0))
     return f"""<h2>市场估值 · 中证全指市盈率（{v['start']} 至今）</h2>
 <div class="card" style="padding:14px 18px">
 <svg viewBox="0 0 1000 220" preserveAspectRatio="none" style="height:210px;width:100%">
@@ -328,7 +330,7 @@ def render_val(v):
   <div class="card"><div class="k">历史分位（2017 至今）</div><div class="v">{v['pct']}%</div></div>
   <div class="card"><div class="k">沪深300 / 中证金融 PE</div><div class="v" style="font-size:20px">{v.get('pe300') or '-'} / {v.get('pe_bank') or '-'}</div></div>
 </div>
-<div class="verdict">{verdict}</div>
+<div class="verdict">{verdict}　·　仓位参考：估值分位 {pct}% → 单笔仓位 ×{coef}</div>
 """
 
 
