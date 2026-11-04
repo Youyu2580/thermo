@@ -70,7 +70,10 @@ def _fetch_cs(code, days=1500):
     for x in rows:
         try:
             amt = float(x.get("tradingValue") or 0)
-            out.append({"d": str(x["tradeDate"]), "close": float(x["close"]),
+            dt = str(x["tradeDate"])
+            if len(dt) == 8:
+                dt = f"{dt[:4]}-{dt[4:6]}-{dt[6:8]}"
+            out.append({"d": dt, "close": float(x["close"]),
                         "vol": amt, "amt": amt})
         except Exception:
             continue
