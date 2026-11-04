@@ -158,6 +158,26 @@ def main():
     avg20 = [sum(amt[i - 19:i + 1]) / 20 for i in range(19, len(amt))]
     vol_pct = pctile(avg20[-250:] if len(avg20) >= 250 else avg20, avg20[-1])
 
+    # 当日快照：涨跌、量比、离均线位置
+    today = {}
+    try:
+        chg = (c300[-1] / c300[-2] - 1) * 100
+        base = sum(amt[-21:-1]) / 20 if len(amt) > 21 else amt[-1]
+        amt_ratio = amt[-1] / base if base else 1.0
+        div_chg = (cdiv[-1] / cdiv[-2] - 1) * 100
+        sig = "常态波动"
+        if abs(chg) >= 2 and amt_ratio >= 1.3:
+            sig = "放量变盘" + ("（向上）" if chg > 0 else "（向下）")
+        elif abs(chg) >= 2:
+            sig = "单日异动（未放量）"
+        today = {"chg": round(chg, 2), "amt_ratio": round(amt_ratio, 2),
+                 "div_chg": round(div_chg, 2), "rel": round(div_chg - chg, 2),
+                 "above20": round((last / ma20 - 1) * 100, 2),
+                 "above60": round((last / ma60 - 1) * 100, 2),
+                 "sig": sig}
+    except Exception as e:  # noqa
+        print(f"[warn] 当日快照失败: {e}")
+
     # 红利相对强弱：比值与其 60 日线
     n = min(len(cdiv), len(c300))
     rs = [cdiv[len(cdiv) - n + i] / c300[len(c300) - n + i] for i in range(n)]
@@ -266,6 +286,7 @@ def main():
         "rs_ma_series": [round(x, 4) for x in [ma(rs[:i + 1], 60) or rs[i] for i in range(len(rs) - 120, len(rs))]],
         "dates": [x["d"][5:] for x in dv[-120:]],
         "val": val,
+        "today": today,
     }
     os.makedirs("site", exist_ok=True)
     with open("site/data.json", "w", encoding="utf-8") as f:
@@ -286,6 +307,23 @@ def svg_path(vals, w=560, h=120):
     pts = [(round(i * step, 1), round(h - (v - lo) / rng * (h - 8) - 4, 1)) for i, v in enumerate(vals)]
     d = "M" + " L".join(f"{x},{y}" for x, y in pts)
     return d
+
+
+def render_today(t):
+    if not t:
+        return ""
+    up = t["chg"] >= 0
+    tone = "bad" if up else "good"  # 大盘涨用暖色，跌用冷色（与红绿灯语义无关）
+    rel_tone = "good" if t["rel"] > 0 else "bad"
+    return f"""<h2>今日快照 · 最新交易日</h2>
+<div class="grid">
+  <div class="card"><div class="k">沪深300 当日</div><div class="v {'up' if up else 'dn'}">{t['chg']:+.2f}%</div></div>
+  <div class="card"><div class="k">成交额 / 20日均</div><div class="v {'bad' if t['amt_ratio'] >= 1.3 else 'dim'}">{t['amt_ratio']:.2f} 倍</div></div>
+  <div class="card"><div class="k">红利当日相对大盘</div><div class="v {rel_tone}">{t['rel']:+.2f}%</div></div>
+  <div class="card"><div class="k">距 20 / 60 日线</div><div class="v" style="font-size:18px">{t['above20']:+.2f}% / {t['above60']:+.2f}%</div></div>
+</div>
+<div class="verdict">信号：{t['sig']}　·　注意：红绿灯看的是 200 日线这类月级指标，单日大阳线不会立刻改色，这一层只用来提醒「今天有事发生」，不是让你当天追。</div>
+"""
 
 
 def render_val(v):
@@ -340,6 +378,7 @@ def render(p):
     label = {"def": "红利 / 防御占优", "off": "进攻板块占优", "mix": "方向不明 · 降仓观望"}[tone]
     rs_d = svg_path(p["rs_series"])
     val_html = render_val(p.get("val") or {})
+    today_html = render_today(p.get("today") or {})
     ma_d = svg_path(p["rs_ma_series"])
     lo = min(p["rs_series"]); hi = max(p["rs_series"])
     sec_html = ""
@@ -390,7 +429,7 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
   <div class="regime">{p['regime']} · {label}</div>
   <div class="verdict">沪深300 {p['px']}（{p['above200']:+.1f}% vs 200日线）· 红利/300 比值{'站上' if p['rs_above'] else '跌破'} 60日线</div>
 </div>
-{bear_box}
+{today_html}{bear_box}
 <div class="grid">
   <div class="card"><div class="k">大盘量能（20日均额分位）</div><div class="v {'good' if (p['vol_pct'] or 0)>=60 else 'warn' if (p['vol_pct'] or 0)>=35 else 'bad'}">{p['vol_pct']}%</div></div>
   <div class="card"><div class="k">红利相对强度（比值/60日线）</div><div class="v">{'<span class=good>↑ 上方</span>' if p['rs_above'] else '<span class=bad>↓ 下方</span>'}<small>5日 {p['rs_5d']:+.2f}% · 20日 {p['rs_20d']:+.2f}%</small></div></div>
