@@ -6,6 +6,11 @@ import time
 import urllib.request
 from datetime import datetime, timezone, timedelta
 
+try:
+    import daily_block
+except Exception:  # noqa
+    daily_block = None
+
 SINA = {  # 备用源：新浪（无成交额字段，用成交量代替）
     "1.000300": "sh000300", "1.000922": "sh000922", "1.000985": "sh000985",
     "1.588000": "sh588000", "1.512480": "sh512480", "1.515000": "sh515000",
@@ -289,6 +294,11 @@ def main():
         "today": today,
     }
     os.makedirs("site", exist_ok=True)
+    if daily_block:
+        try:
+            payload["daily"] = daily_block.build()
+        except Exception as e:  # noqa
+            print(f"[warn] 每日体检取数失败: {e}")
     with open("site/data.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1)
 
@@ -379,6 +389,10 @@ def render(p):
     rs_d = svg_path(p["rs_series"])
     val_html = render_val(p.get("val") or {})
     today_html = render_today(p.get("today") or {})
+    try:
+        daily_html = daily_block.html(p.get("daily") or {}) if daily_block else ""
+    except Exception:
+        daily_html = ""
     ma_d = svg_path(p["rs_ma_series"])
     lo = min(p["rs_series"]); hi = max(p["rs_series"])
     sec_html = ""
@@ -422,6 +436,17 @@ td{{padding:8px 6px;border-bottom:1px solid #21262d}}
 svg{{width:100%;height:130px;margin-top:8px}}
 .foot{{color:#6e7681;font-size:12px;margin-top:28px}}
 h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
+.chk{{margin:14px 0 18px;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px 16px}}
+.chk-top{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}}
+.chk-act{{font-size:14px;font-weight:600;color:#e6edf3}}
+.badge{{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;border:1px solid currentColor}}
+.chk .row{{display:flex;justify-content:space-between;gap:14px;padding:10px 0;border-bottom:1px solid #21262d}}
+.chk .row:last-child{{border-bottom:0}}
+.chk .l{{color:#8b949e;font-size:13px;flex:1 1 40%}}
+.chk .r{{font-size:14px;font-weight:600;text-align:right;flex:1 1 55%;color:#e6edf3}}
+.chk .r .n{{font-size:12px;color:#8b949e;font-weight:400;margin-top:3px}}
+.chk-foot{{color:#6e7681;font-size:11px;margin-top:8px;line-height:1.5}}
+@media(max-width:480px){{.chk .row{{flex-direction:column;gap:2px}}.chk .r{{text-align:left}}}}
 </style></head><body><div class="wrap">
 <h1>资金温度计 · 量价版的行情判定</h1>
 <div class="sub">数据截至 {p['date']} 收盘 · 生成于 {p['updated']} · 仅供自己复盘，不构成投资建议</div>
@@ -429,7 +454,7 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
   <div class="regime">{p['regime']} · {label}</div>
   <div class="verdict">沪深300 {p['px']}（{p['above200']:+.1f}% vs 200日线）· 红利/300 比值{'站上' if p['rs_above'] else '跌破'} 60日线</div>
 </div>
-{today_html}{bear_box}
+{today_html}{daily_html}{bear_box}
 <div class="grid">
   <div class="card"><div class="k">大盘量能（20日均额分位）</div><div class="v {'good' if (p['vol_pct'] or 0)>=60 else 'warn' if (p['vol_pct'] or 0)>=35 else 'bad'}">{p['vol_pct']}%</div></div>
   <div class="card"><div class="k">红利相对强度（比值/60日线）</div><div class="v">{'<span class=good>↑ 上方</span>' if p['rs_above'] else '<span class=bad>↓ 下方</span>'}<small>5日 {p['rs_5d']:+.2f}% · 20日 {p['rs_20d']:+.2f}%</small></div></div>
