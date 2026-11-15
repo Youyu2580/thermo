@@ -272,7 +272,7 @@ def html(d):
 
     ur = d.get("up_ratio") or 0
     if ur < 20:
-        wx, wc, act = "普跌", "bad", "先别砍，也别加；等明天有没有反抽"
+        wx, wc, act = "普跌", "bad", "不必恐慌，但也不是买点；先别砍，也别加"
     elif ur < 40:
         wx, wc, act = "偏弱", "warn", "该减的立刻减——慢慢失血的日子最磨人"
     elif ur < 60:
