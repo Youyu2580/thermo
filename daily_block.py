@@ -180,6 +180,59 @@ def fetch_spots():
 
 
 # ---------- 4. 汇总 ----------
+# 九格矩阵：上涨占比(W) × MA20 宽度(M)，统计口径见 breadth_backtest.py --long（799 日 / 5526 只）
+GRID = {
+    (0, 0): ("Y", "超跌", "均线下方 + 今天普跌。3 年里这格 -0.5%、基准 -0.6% —— 不必恐慌，但也没便宜到值得抢"),
+    (0, 1): ("R", "阴跌", "最差的一格（-1.2%，n=176）：票都在均线下方磨、今天还不温不火。没有恐慌、只有失血，该减的要真减"),
+    (0, 2): ("Y", "弱修复", "均线还压着但今天普遍在涨。-0.9%，比阴跌好、仍为负——可以拿，别加"),
+    (1, 0): ("G", "偏强回调", "多数票还在均线上方，今天跌一波是回调不是崩，别割（+0.4%，n=21）"),
+    (1, 1): ("G", "中性", "跟基准差不多，没有额外信号，照自己节奏"),
+    (1, 2): ("G", "偏强", "比基准略好，可以拿"),
+    (2, 0): ("G", "强势急跌", "多数票站上均线、今天急跌。历史 +1.6% 但只有 n=11，样本太薄不能当规律 —— 先别动，明天看"),
+    (2, 1): ("Y", "强势震荡", "跟基准一样，没有额外信号"),
+    (2, 2): ("G", "强势", "唯一稳定正收益的格子（+0.2%，n=118）—— 手上有的拿住"),
+}
+
+
+def _tier_m(m):
+    return 0 if m < 40 else (1 if m < 60 else 2)
+
+
+def _tier_w(w):
+    return 0 if w < 20 else (1 if w < 60 else 2)
+
+
+def _kline_above_ma20(sym):
+    u = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={sym},day,,,25,qfq"
+    try:
+        j = json.loads(_get(u, "https://gu.qq.com/", timeout=10, tries=2))
+        node = (j.get("data") or {}).get(sym) or {}
+        ks = node.get("qfqday") or node.get("day") or []
+        if len(ks) < 21:
+            return None
+        cs = [float(x[2]) for x in ks if x and len(x) > 2]
+        if len(cs) < 21:
+            return None
+        return cs[-1] > sum(cs[-20:]) / 20.0
+    except Exception:
+        return None
+
+
+def ma20_breadth(syms, workers=12):
+    from concurrent.futures import ThreadPoolExecutor
+    ok = 0
+    hit = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for v in ex.map(_kline_above_ma20, syms):
+            if v is None:
+                continue
+            ok += 1
+            if v:
+                hit += 1
+    if ok < 3000:
+        return None
+    return {"pct": round(hit / ok * 100, 1), "n": ok}
+
 def build():
     d = {"ok": False}
     rows = []
@@ -235,6 +288,12 @@ def build():
                       for nm, _, _ in tiers if tstat[nm][1] > 0]
         d["med"] = round(sorted([_num(r.get("changepercent")) for r in rows
                                  if _num(r.get("changepercent")) is not None])[len(rows)//2], 2)
+        try:
+            syms = [r.get("symbol") for r in rows
+                    if r.get("symbol") and not str(r["symbol"]).startswith("bj")]
+            d["ma20"] = ma20_breadth(syms)
+        except Exception as e:
+            d["err_ma20"] = f"{type(e).__name__}"
 
     try:
         cs = curve_stats(fetch_curve())
@@ -271,7 +330,11 @@ def html(d):
                 '<div class="n">今天数据没取到（休市或接口异常），明天再看。</div></div>')
 
     ur = d.get("up_ratio") or 0
-    if ur < 20:
+    m20 = (d.get("ma20") or {}).get("pct")
+    if m20 is not None:
+        lv, wx, act = GRID[(_tier_m(m20), _tier_w(ur))]
+        wc = {"R": "bad", "Y": "warn", "G": "good"}[lv]
+    elif ur < 20:
         wx, wc, act = "普跌", "bad", "不必恐慌，但也不是买点；先别砍，也别加"
     elif ur < 40:
         wx, wc, act = "偏弱", "warn", "该减的立刻减——慢慢失血的日子最磨人"
@@ -297,9 +360,13 @@ def html(d):
              f'{d["up"]} 涨 / {d["dn"]} 跌 · <b class="{wc}">{ur:.0f}% 在涨</b>',
              f'中位涨跌 {d.get("med", 0):+.1f}%',
              ""),
-        _row("跌的是大票还是小票", struct,
-             " / ".join(f'{t["name"]} {t["up_ratio"]:.0f}%' for t in tiers)),
     ]
+    if m20 is not None:
+        rows.append(_row("多少票站在 20 日线上", f'{m20:.0f}%',
+                         f'上涨 {ur:.0f}% × 均线 {m20:.0f}% → 落「{wx}」格 · 样本 {d["ma20"]["n"]} 只'))
+    rows.append(
+        _row("跌的是大票还是小票", struct,
+             " / ".join(f'{t["name"]} {t["up_ratio"]:.0f}%' for t in tiers)))
 
     c = d.get("curve")
     if c:
