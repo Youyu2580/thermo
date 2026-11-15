@@ -203,33 +203,56 @@ def _tier_w(w):
 
 
 def _kline_above_ma20(sym):
-    u = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={sym},day,,,25,qfq"
+    """腾讯优先，失败退东财；返回 close>MA20 的布尔或 None"""
     try:
-        j = json.loads(_get(u, "https://gu.qq.com/", timeout=10, tries=2))
+        u = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={sym},day,,,25,qfq"
+        j = json.loads(_get(u, "https://gu.qq.com/", timeout=5, tries=1))
         node = (j.get("data") or {}).get(sym) or {}
         ks = node.get("qfqday") or node.get("day") or []
-        if len(ks) < 21:
-            return None
         cs = [float(x[2]) for x in ks if x and len(x) > 2]
-        if len(cs) < 21:
-            return None
-        return cs[-1] > sum(cs[-20:]) / 20.0
+        if len(cs) >= 21:
+            return cs[-1] > sum(cs[-20:]) / 20.0
     except Exception:
+        pass
+    try:
+        code = str(sym)[2:]
+        secid = ("1." if str(sym)[:2] == "sh" else "0.") + code
+        u = ("https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+             f"secid={secid}&klt=101&fqt=1&lmt=25&fields1=f1&fields2=f51,f53")
+        j = json.loads(_get(u, "https://quote.eastmoney.com/", timeout=5, tries=1))
+        ks = ((j.get("data") or {}).get("klines") or [])
+        cs = [float(x.split(",")[1]) for x in ks if x.count(",") >= 1]
+        if len(cs) >= 21:
+            return cs[-1] > sum(cs[-20:]) / 20.0
+    except Exception:
+        pass
+    return None
+
+
+def ma20_breadth(syms, cap=1800, budget=240, workers=24):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    if not syms:
         return None
-
-
-def ma20_breadth(syms, workers=12):
-    from concurrent.futures import ThreadPoolExecutor
-    ok = 0
-    hit = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for v in ex.map(_kline_above_ma20, syms):
+    step = max(1, len(syms) // cap)
+    sample = syms[::step]
+    ok = hit = 0
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futs = [ex.submit(_kline_above_ma20, s) for s in sample]
+        for f in as_completed(futs, timeout=budget):
+            try:
+                v = f.result()
+            except Exception:
+                continue
             if v is None:
                 continue
             ok += 1
-            if v:
-                hit += 1
-    if ok < 3000:
+            hit += 1 if v else 0
+    except Exception:
+        pass
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    if ok < 600:
         return None
     return {"pct": round(hit / ok * 100, 1), "n": ok}
 
