@@ -8,7 +8,9 @@ import ssl
 import time
 import urllib.parse
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+TZ = timezone(timedelta(hours=8))
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "Chrome/122.0 Safari/537.36")
@@ -332,7 +334,7 @@ def build():
         d["err_basis"] = f"{type(e).__name__}"
 
     d["ok"] = bool(d.get("up_ratio") is not None)
-    d["ts"] = time.strftime("%Y-%m-%d %H:%M")
+    d["ts"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
     return d
 
 
