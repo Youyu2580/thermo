@@ -393,6 +393,13 @@ def render(p):
         daily_html = daily_block.html(p.get("daily") or {}) if daily_block else ""
     except Exception:
         daily_html = ""
+    lag_note = ""
+    try:
+        dd = ((p.get("daily") or {}).get("curve") or {}).get("date") or ""
+        if dd and dd != p["date"]:
+            lag_note = "（指数数据滞后一天，体检板块是最新的）"
+    except Exception:
+        lag_note = ""
     ma_d = svg_path(p["rs_ma_series"])
     lo = min(p["rs_series"]); hi = max(p["rs_series"])
     sec_html = ""
@@ -449,7 +456,7 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 @media(max-width:480px){{.chk .row{{flex-direction:column;gap:2px}}.chk .r{{text-align:left}}}}
 </style></head><body><div class="wrap">
 <h1>资金温度计 · 量价版的行情判定</h1>
-<div class="sub">数据截至 {p['date']} 收盘 · 生成于 {p['updated']} · 仅供自己复盘，不构成投资建议</div>
+<div class="sub">数据截至 {p['date']} 收盘{lag_note} · 生成于 {p['updated']} · 仅供自己复盘，不构成投资建议</div>
 <div class="hero">
   <div class="regime">{p['regime']} · {label}</div>
   <div class="verdict">沪深300 {p['px']}（{p['above200']:+.1f}% vs 200日线）· 红利/300 比值{'站上' if p['rs_above'] else '跌破'} 60日线</div>
