@@ -309,6 +309,30 @@ def build():
         d["dn"] = dn
         d["up_ratio"] = round(up / n * 100, 1) if n else None
         d["pb_ratio"] = round(pbl / pbv * 100, 2) if pbv else None
+        d["amt"] = round(sum(amts) / 1e8) if amts else None
+        # 涨跌停：按板分层（主板 10% / 双创 20% / 北交所 30% / ST 5%），新股前 5 日无限制不计数
+        lu = ld = 0
+        for r in rows:
+            pct = _num(r.get("changepercent"))
+            sym = str(r.get("symbol") or "")
+            name = str(r.get("name") or "")
+            if pct is None or not sym:
+                continue
+            if name[:1] in ("N", "C") and len(name) > 1 and "\u4e00" <= name[1] <= "\u9fff":
+                continue
+            lim = 10.0
+            code = sym[2:]
+            if sym.startswith("bj") or code[:1] in ("4", "8", "9"):
+                lim = 30.0
+            elif code.startswith(("300", "301", "688", "689")):
+                lim = 20.0
+            if "ST" in name.upper() and lim == 10.0:
+                lim = 5.0
+            if pct >= lim - 0.15:
+                lu += 1
+            elif pct <= -(lim - 0.15):
+                ld += 1
+        d["lu"], d["ld"] = lu, ld
         amts.sort(reverse=True)
         if amts:
             k = max(1, int(len(amts) * 0.05))
