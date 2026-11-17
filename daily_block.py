@@ -3,6 +3,7 @@
 
 只依赖标准库，供 update.py 调用；任何一段失败都不影响主页面。
 """
+import hashlib
 import json
 import ssl
 import time
@@ -231,12 +232,15 @@ def _kline_above_ma20(sym):
     return None
 
 
-def ma20_breadth(syms, cap=1800, budget=240, workers=24):
+def ma20_breadth(syms, target=2400, budget=420, workers=28, min_cov=0.7):
+    """固定样本量的 MA20 宽度：按代码哈希取前 target 只，样本构成逐日稳定，
+    避免「今天 1741 只、明天 2612 只」导致档位在阈值附近来回跳。
+    覆盖率不足 min_cov 时返回 None，让上层沿用上一次的值。"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     if not syms:
         return None
-    step = max(1, len(syms) // cap)
-    sample = syms[::step]
+    order = sorted(syms, key=lambda x: hashlib.md5(str(x).encode()).hexdigest())
+    sample = order[:target]
     ok = hit = 0
     ex = ThreadPoolExecutor(max_workers=workers)
     try:
@@ -254,7 +258,7 @@ def ma20_breadth(syms, cap=1800, budget=240, workers=24):
         pass
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
-    if ok < 600:
+    if ok < len(sample) * min_cov:
         return None
     return {"pct": round(hit / ok * 100, 1), "n": ok}
 
