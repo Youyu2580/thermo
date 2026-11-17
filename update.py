@@ -16,6 +16,11 @@ try:
 except Exception:  # noqa
     basis_block = None
 
+try:
+    import nine_block
+except Exception:  # noqa
+    nine_block = None
+
 SINA = {  # 备用源：新浪（无成交额字段，用成交量代替）
     "1.000300": "sh000300", "1.000922": "sh000922", "1.000985": "sh000985",
     "1.588000": "sh588000", "1.512480": "sh512480", "1.515000": "sh515000",
@@ -317,6 +322,19 @@ def main():
                     print("[warn] 期指基差沿用上次数据")
             except Exception:
                 pass
+    if nine_block:
+        try:
+            payload["nine"] = nine_block.build(payload)
+        except Exception as e:  # noqa
+            print(f"[warn] 九流派取数失败: {e}")
+            try:
+                with open("site/data.json", encoding="utf-8") as f:
+                    prev = (json.load(f) or {}).get("nine") or {}
+                if prev.get("rows"):
+                    payload["nine"] = prev
+                    print("[warn] 九流派沿用上次数据")
+            except Exception:
+                pass
     with open("site/data.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1)
 
@@ -412,6 +430,10 @@ def render(p):
         daily_html = daily_block.html(p.get("daily") or {}) if daily_block else ""
     except Exception:
         daily_html = ""
+    try:
+        nine_html = nine_block.html(p.get("nine") or {}) if nine_block else ""
+    except Exception:
+        nine_html = ""
     lag_note = ""
     try:
         dd = ((p.get("daily") or {}).get("curve") or {}).get("date") or ""
@@ -475,6 +497,17 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 .chk .r{{font-size:14px;font-weight:600;text-align:right;flex:1 1 55%;color:#e6edf3}}
 .chk .r .n{{font-size:12px;color:#8b949e;font-weight:400;margin-top:3px}}
 .chk-foot{{color:#6e7681;font-size:11px;margin-top:8px;line-height:1.5}}
+.nine-wrap{{padding:6px 14px}}
+.nine{{font-size:13px}}
+.nine th:nth-child(1){{width:112px}}
+.nine th:nth-child(3){{width:138px}}
+.nine td{{vertical-align:top}}
+.nine-id{{display:inline-block;width:18px;height:18px;line-height:18px;text-align:center;border-radius:4px;background:#21262d;color:#8b949e;font-size:11px;margin-right:6px}}
+.nine-a .badge{{font-size:12px;white-space:nowrap}}
+.nine-note{{color:#8b949e;font-size:11px;margin-top:4px;line-height:1.45}}
+.nine-sum{{margin:8px 0 10px;color:#c9d1d9;font-size:13px;display:flex;gap:10px;flex-wrap:wrap}}
+.nine-sum span{{color:#8b949e}}
+@media(max-width:680px){{.nine thead{{display:none}}.nine tr{{display:block;border-bottom:1px solid #21262d;padding:10px 0}}.nine td{{display:block;border:0;padding:3px 0}}.nine td:nth-child(3){{margin-top:4px}}}}
 @media(max-width:480px){{.chk .row{{flex-direction:column;gap:2px}}.chk .r{{text-align:left}}}}
 </style></head><body><div class="wrap">
 <h1>资金温度计 · 量价版的行情判定</h1>
@@ -485,6 +518,7 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 </div>
     {daily_html}{bear_box}
 {cards_html}
+{nine_html}
 <h2>主线候选排名（20日相对沪深300超额）</h2>
 <div class="card">
 <table><tr><th>#</th><th>板块</th><th>20日超额</th><th>5日超额</th><th>60日位置</th></tr>{sec_html}</table>
