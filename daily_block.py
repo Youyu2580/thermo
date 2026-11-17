@@ -327,12 +327,6 @@ def build():
     except Exception as e:
         d["err_curve"] = f"{type(e).__name__}"
 
-    try:
-        spots = fetch_spots()
-        d["basis"] = fetch_basis(spots)
-    except Exception as e:
-        d["err_basis"] = f"{type(e).__name__}"
-
     d["ok"] = bool(d.get("up_ratio") is not None)
     d["ts"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
     return d
@@ -401,21 +395,6 @@ def html(d):
                          f'10 年 {c["y10"]:.2f}% · 1 年 {c["y1"]:.2f}%' if c.get("y1") else f'10 年 {c["y10"]:.2f}%',
                          f'5 天 {chg:+.1f}bp（{tone}）· 期限利差 {c.get("spread", 0):.0f}bp' if chg is not None else
                          f'期限利差 {c.get("spread", 0):.0f}bp'))
-
-    b = d.get("basis") or {}
-    if b:
-        anns = [v["ann"] for v in b.values()]
-        avg = sum(anns) / len(anns)
-        if avg <= -15:
-            note, cls = "贴水很深：机构对冲重，偏谨慎（不预测方向）", "bad"
-        elif avg <= -8:
-            note, cls = "贴水偏深：机构在买保护", "warn"
-        else:
-            note, cls = "贴水很浅：没人急着买保护", "good"
-        rows.append(_row("机构买保险贵不贵",
-                         f'年化 {avg:.0f}%',
-                         note + " · " + " / ".join(f'{k} {v["ann"]:.0f}%' for k, v in b.items()),
-                         cls))
 
     if d.get("pb_ratio") is not None:
         rows.append(_row("便宜货多吗",
