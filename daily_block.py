@@ -316,9 +316,22 @@ def build():
         try:
             syms = [r.get("symbol") for r in rows
                     if r.get("symbol") and not str(r["symbol"]).startswith("bj")]
-            d["ma20"] = ma20_breadth(syms)
+            m = ma20_breadth(syms)
+            if m and m.get("pct") is not None:
+                d["ma20"] = m
         except Exception as e:
             d["err_ma20"] = f"{type(e).__name__}"
+        if not d.get("ma20"):
+            # 兜底：沿用上一次成功算出的 MA20 占比，并打上 stale 标记，避免档位悄悄变松
+            try:
+                with open("site/data.json", encoding="utf-8") as f:
+                    pm = ((json.load(f) or {}).get("daily") or {}).get("ma20") or {}
+                if pm.get("pct") is not None:
+                    pm = dict(pm)
+                    pm["stale"] = True
+                    d["ma20"] = pm
+            except Exception:
+                pass
 
     try:
         cs = curve_stats(fetch_curve())
@@ -381,8 +394,9 @@ def html(d):
              ""),
     ]
     if m20 is not None:
+        stale = " · 今日取数失败，沿用上次" if (d.get("ma20") or {}).get("stale") else ""
         rows.append(_row("多少票站在 20 日线上", f'{m20:.0f}%',
-                         f'上涨 {ur:.0f}% × 均线 {m20:.0f}% → 落「{wx}」格 · 样本 {d["ma20"]["n"]} 只'))
+                         f'上涨 {ur:.0f}% × 均线 {m20:.0f}% → 落「{wx}」格 · 样本 {d["ma20"]["n"]} 只{stale}'))
     rows.append(
         _row("跌的是大票还是小票", struct,
              " / ".join(f'{t["name"]} {t["up_ratio"]:.0f}%' for t in tiers)))
