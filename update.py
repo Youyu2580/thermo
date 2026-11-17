@@ -337,24 +337,39 @@ def svg_path(vals, w=560, h=120):
     return d
 
 
-def render_today(t):
-    if not t:
-        return ""
-    up = t["chg"] >= 0
-    tone = "bad" if up else "good"  # 大盘涨用暖色，跌用冷色（与红绿灯语义无关）
-    rel_tone = "good" if t["rel"] > 0 else "bad"
-    return f"""<h2>今日快照 · 最新交易日</h2>
-<div class="grid">
-  <div class="card"><div class="k">沪深300 当日</div><div class="v {'up' if up else 'dn'}">{t['chg']:+.2f}%</div></div>
-  <div class="card"><div class="k">成交额 / 20日均</div><div class="v {'bad' if t['amt_ratio'] >= 1.3 else 'dim'}">{t['amt_ratio']:.2f} 倍</div></div>
-  <div class="card"><div class="k">红利当日相对大盘</div><div class="v {rel_tone}">{t['rel']:+.2f}%</div></div>
-  <div class="card"><div class="k">距 20 / 60 日线</div><div class="v" style="font-size:18px">{t['above20']:+.2f}% / {t['above60']:+.2f}%</div></div>
-</div>
-<div class="verdict">信号：{t['sig']}　·　注意：红绿灯看的是 200 日线这类月级指标，单日大阳线不会立刻改色，这一层只用来提醒「今天有事发生」，不是让你当天追。</div>
-"""
+def top_cards(p):
+    """顶部四卡：量能 / 红利相对强度 / 均线位置 / 估值——一屏看完所有结论"""
+    t = p.get("today") or {}
+    v = p.get("val") or {}
+    vol = p.get("vol_pct") or 0
+    tone_vol = "good" if vol >= 60 else "warn" if vol >= 35 else "bad"
+    ratio = t.get("amt_ratio")
+    ratio_txt = f"今日量比 {ratio:.2f} 倍" if ratio is not None else "今日量比 —"
+    rs5, rs20 = p.get("rs_5d"), p.get("rs_20d")
+    rs_lbl = "↑ 上方" if p["rs_above"] else "↓ 下方"
+    rs_cls = "good" if p["rs_above"] else "bad"
+    rs_5 = f"{rs5:+.2f}%" if rs5 is not None else "—"
+    rs_20 = f"{rs20:+.2f}%" if rs20 is not None else "—"
+    pe, pct = v.get("pe"), v.get("pct")
+    share = p.get("share")
+    share_txt = f"{share}%" if share is not None else "—"
+    s5 = p.get("share_5d")
+    share_5d = f"{s5:+.1f}%" if s5 is not None else "—"
+    if pe:
+        coef = 0.5 if pct >= 80 else (0.75 if pct >= 60 else (1.25 if pct <= 20 else 1.0))
+        pe_txt, pe_note = f"{pe} · {pct}%", f"2017 至今分位 · 单笔仓位 ×{coef}"
+    else:
+        pe_txt, pe_note = "—", "估值取数失败"
+    return f"""<div class="grid">
+  <div class="card"><div class="k">大盘量能（20日均额分位）</div><div class="v {tone_vol}">{vol}%<small>{ratio_txt}</small></div></div>
+  <div class="card"><div class="k">红利相对强度（vs 60日线）</div><div class="v"><span class="{rs_cls}">{rs_lbl}</span><small>5日 {rs_5} · 20日 {rs_20}</small></div></div>
+  <div class="card"><div class="k">红利{p["share_unit"]}占比（20日均）</div><div class="v" style="font-size:20px">{share_txt}<small>20日均 · 5日 {share_5d}</small></div></div>
+  <div class="card"><div class="k">中证全指 PE / 历史分位</div><div class="v" style="font-size:20px">{pe_txt}<small>{pe_note}</small></div></div>
+</div>"""
 
 
-def render_val(v):
+def val_chart(v):
+    """估值曲线：默认折叠，点开看"""
     if not v.get("pe"):
         return ""
     vals = v["series"]
@@ -369,15 +384,7 @@ def render_val(v):
     step = W / max(len(vals) - 1, 1)
     d = "M" + " L".join(f"{round(i * step, 1)},{yy(x)}" for i, x in enumerate(vals))
     cur = v["pe"]
-    if cur >= v["hi"]:
-        tone, verdict = "bad", "偏贵：已接近/超过高估线，红利以外的仓位要想清楚再上"
-    elif cur <= v["lo"]:
-        tone, verdict = "good", "偏便宜：接近低估线，是分批加的区间"
-    else:
-        tone, verdict = "warn", "中性：不便宜也不贵，按各自纪律走"
-    pct = v["pct"]
-    coef = 0.5 if pct >= 80 else (0.75 if pct >= 60 else (1.25 if pct <= 20 else 1.0))
-    return f"""<h2>市场估值 · 中证全指市盈率（{v['start']} 至今）</h2>
+    return f"""<details><summary>市场估值曲线 · 中证全指市盈率（{v['start']} 至今 · {v['n']} 个交易日）</summary>
 <div class="card" style="padding:14px 18px">
 <svg viewBox="0 0 1000 220" preserveAspectRatio="none" style="height:210px;width:100%">
 <path d="{d}" fill="none" stroke="#58a6ff" stroke-width="1.6"/>
@@ -389,15 +396,8 @@ def render_val(v):
 <text x="10" y="{yy(v['mean']) + 18}" fill="#f0b429" font-size="13">均值 {v['mean']}</text>
 <text x="10" y="{yy(v['lo']) + 20}" fill="#2fd47a" font-size="13">低估线 {v['lo']}</text>
 </svg>
-<div class="sub">蓝线=中证全指市盈率（含银行，官方口径）· 红=均值+1σ · 黄=均值 · 绿=均值−1σ · 共 {v['n']} 个交易日</div>
-</div>
-<div class="grid">
-  <div class="card"><div class="k">当前市盈率</div><div class="v {tone}">{v['pe']}</div></div>
-  <div class="card"><div class="k">历史分位（2017 至今）</div><div class="v">{v['pct']}%</div></div>
-  <div class="card"><div class="k">沪深300 / 中证金融 PE</div><div class="v" style="font-size:20px">{v.get('pe300') or '-'} / {v.get('pe_bank') or '-'}</div></div>
-</div>
-<div class="verdict">{verdict}　·　仓位参考：估值分位 {pct}% → 单笔仓位 ×{coef}</div>
-"""
+<div class="sub">蓝线=中证全指市盈率（含银行，官方口径）· 红=均值+1σ · 黄=均值 · 绿=均值−1σ · 沪深300 {v.get('pe300') or '-'} · 中证金融 {v.get('pe_bank') or '-'}</div>
+</div></details>"""
 
 
 def render(p):
@@ -405,9 +405,9 @@ def render(p):
     lam = {"def": "#2fd47a", "off": "#ff6b6b", "mix": "#f0b429"}[tone]
     label = {"def": "红利 / 防御占优", "off": "进攻板块占优", "mix": "方向不明 · 降仓观望"}[tone]
     rs_d = svg_path(p["rs_series"])
-    val_html = render_val(p.get("val") or {})
     basis_html = basis_block.html(p.get("basis") or {}) if basis_block else ""
-    today_html = render_today(p.get("today") or {})
+    cards_html = top_cards(p)
+    vchart = val_chart(p.get("val") or {})
     try:
         daily_html = daily_block.html(p.get("daily") or {}) if daily_block else ""
     except Exception:
@@ -422,7 +422,7 @@ def render(p):
     ma_d = svg_path(p["rs_ma_series"])
     lo = min(p["rs_series"]); hi = max(p["rs_series"])
     sec_html = ""
-    for i, s in enumerate(p["sectors"][:8], 1):
+    for i, s in enumerate([x for x in p["sectors"] if x["name"] != "沪深300"][:8], 1):
         cls = "up" if s["r20"] > 0 else "dn"
         sec_html += (
             f'<tr><td class="rk">{i}</td><td>{s["name"]}</td>'
@@ -461,6 +461,9 @@ td{{padding:8px 6px;border-bottom:1px solid #21262d}}
 .rk{{color:#8b949e;width:28px}} .up{{color:#2fd47a}} .dn{{color:#ff6b6b}} .dim{{color:#8b949e}}
 svg{{width:100%;height:130px;margin-top:8px}}
 .foot{{color:#6e7681;font-size:12px;margin-top:28px}}
+details{{margin:10px 0;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:10px 16px}}
+summary{{cursor:pointer;color:#8b949e;font-size:13px}}
+details[open] summary{{margin-bottom:8px}}
 h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 .chk{{margin:14px 0 18px;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px 16px}}
 .chk-top{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}}
@@ -480,26 +483,23 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
   <div class="regime">{p['regime']} · {label}</div>
   <div class="verdict">沪深300 {p['px']}（{p['above200']:+.1f}% vs 200日线）· 红利/300 比值{'站上' if p['rs_above'] else '跌破'} 60日线</div>
 </div>
-{today_html}{daily_html}{bear_box}
-<div class="grid">
-  <div class="card"><div class="k">大盘量能（20日均额分位）</div><div class="v {'good' if (p['vol_pct'] or 0)>=60 else 'warn' if (p['vol_pct'] or 0)>=35 else 'bad'}">{p['vol_pct']}%</div></div>
-  <div class="card"><div class="k">红利相对强度（比值/60日线）</div><div class="v">{'<span class=good>↑ 上方</span>' if p['rs_above'] else '<span class=bad>↓ 下方</span>'}<small>5日 {p['rs_5d']:+.2f}% · 20日 {p['rs_20d']:+.2f}%</small></div></div>
-  <div class="card"><div class="k">红利{p["share_unit"]}占比（20日均）</div><div class="v">{share_txt}</div></div>
-  <div class="card"><div class="k">沪深300 均线</div><div class="v" style="font-size:15px">20日 {p['ma20']} · 60日 {p['ma60']}<br>200日 {p['ma200']} · 250日 {p['ma250']}</div></div>
+    {daily_html}{bear_box}
+{cards_html}
+<h2>主线候选排名（20日相对沪深300超额）</h2>
+<div class="card">
+<table><tr><th>#</th><th>板块</th><th>20日超额</th><th>5日超额</th><th>60日位置</th></tr>{sec_html}</table>
 </div>
-<h2>红利 / 沪深300 相对强弱（近 120 交易日 · 蓝=比值 灰=60日线）</h2>
+<details><summary>红利 / 沪深300 相对强弱曲线（近 120 交易日 · 蓝=比值 灰=60日线）</summary>
 <div class="card" style="padding:12px 16px">
 <svg viewBox="0 0 560 120" preserveAspectRatio="none">
 <path d="{ma_d}" fill="none" stroke="#6e7681" stroke-width="1.2" stroke-dasharray="4 3"/>
 <path d="{rs_d}" fill="none" stroke="#58a6ff" stroke-width="1.8"/>
 </svg>
 <div class="sub">区间 {lo:.4f} ~ {hi:.4f} · 上行=钱在往红利躲，下行=钱在往进攻跑</div>
-</div>
-<h2>主线候选排名（20日相对沪深300超额）</h2>
-<div class="card">
-<table><tr><th>#</th><th>板块</th><th>20日超额</th><th>5日超额</th><th>60日位置</th></tr>{sec_html}</table>
-</div>
-{val_html}{basis_html}<div class="foot">口径：量能分位=20日均成交额在过去一年分布中的位置；相对强弱=中证红利收盘/沪深300收盘；成交占比=中证红利成交额/中证全指成交额；板块以中证/国证行业指数代理；基差=期货收盘−现货指数，主力合约按持仓量拼接。数据源：中证指数官网（指数行情与市盈率）、新浪期货、东方财富（指数日线）。{p['src_note']}</div>
+</div></details>
+{vchart}
+{basis_html}
+<div class="foot">口径：量能分位=20日均成交额在过去一年分布中的位置；相对强弱=中证红利收盘/沪深300收盘；基差=期货收盘−现货指数，主力合约按持仓量拼接。数据源：中证指数官网、新浪期货、东方财富。{p['src_note']}</div>
 </div></body></html>"""
 
 
