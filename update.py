@@ -11,6 +11,11 @@ try:
 except Exception:  # noqa
     daily_block = None
 
+try:
+    import basis_block
+except Exception:  # noqa
+    basis_block = None
+
 SINA = {  # 备用源：新浪（无成交额字段，用成交量代替）
     "1.000300": "sh000300", "1.000922": "sh000922", "1.000985": "sh000985",
     "1.588000": "sh588000", "1.512480": "sh512480", "1.515000": "sh515000",
@@ -299,6 +304,19 @@ def main():
             payload["daily"] = daily_block.build()
         except Exception as e:  # noqa
             print(f"[warn] 每日体检取数失败: {e}")
+    if basis_block:
+        try:
+            payload["basis"] = basis_block.build()
+        except Exception as e:  # noqa
+            print(f"[warn] 期指基差取数失败: {e}")
+            try:
+                with open("site/data.json", encoding="utf-8") as f:
+                    prev = (json.load(f) or {}).get("basis") or {}
+                if prev.get("rows"):
+                    payload["basis"] = prev
+                    print("[warn] 期指基差沿用上次数据")
+            except Exception:
+                pass
     with open("site/data.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1)
 
@@ -388,6 +406,7 @@ def render(p):
     label = {"def": "红利 / 防御占优", "off": "进攻板块占优", "mix": "方向不明 · 降仓观望"}[tone]
     rs_d = svg_path(p["rs_series"])
     val_html = render_val(p.get("val") or {})
+    basis_html = basis_block.html(p.get("basis") or {}) if basis_block else ""
     today_html = render_today(p.get("today") or {})
     try:
         daily_html = daily_block.html(p.get("daily") or {}) if daily_block else ""
@@ -480,7 +499,7 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 <div class="card">
 <table><tr><th>#</th><th>板块</th><th>20日超额</th><th>5日超额</th><th>60日位置</th></tr>{sec_html}</table>
 </div>
-{val_html}<div class="foot">口径：量能分位=20日均成交额在过去一年分布中的位置；相对强弱=中证红利收盘/沪深300收盘；成交占比=中证红利成交额/中证全指成交额；板块以中证/国证行业指数代理。数据源：中证指数官网（指数行情与市盈率）。{p['src_note']}</div>
+{val_html}{basis_html}<div class="foot">口径：量能分位=20日均成交额在过去一年分布中的位置；相对强弱=中证红利收盘/沪深300收盘；成交占比=中证红利成交额/中证全指成交额；板块以中证/国证行业指数代理；基差=期货收盘−现货指数，主力合约按持仓量拼接。数据源：中证指数官网（指数行情与市盈率）、新浪期货、东方财富（指数日线）。{p['src_note']}</div>
 </div></body></html>"""
 
 
