@@ -503,11 +503,16 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 .nine th:nth-child(3){{width:138px}}
 .nine td{{vertical-align:top}}
 .nine-id{{display:inline-block;width:18px;height:18px;line-height:18px;text-align:center;border-radius:4px;background:#21262d;color:#8b949e;font-size:11px;margin-right:6px}}
+.nine-dot{{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}}
+.nine-dot.good{{background:#2fd47a}}.nine-dot.bad{{background:#ff6b6b}}.nine-dot.warn{{background:#f0b429}}
+.nine-gates{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:10px 0}}
+.nine-gates>div{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px 12px;font-size:12px;color:#c9d1d9;line-height:1.5}}
+.nine-gates b{{display:block;color:#8b949e;font-weight:500;font-size:11px;margin-bottom:2px}}
 .nine-a .badge{{font-size:12px;white-space:nowrap}}
 .nine-note{{color:#8b949e;font-size:11px;margin-top:4px;line-height:1.45}}
 .nine-sum{{margin:8px 0 10px;color:#c9d1d9;font-size:13px;display:flex;gap:10px;flex-wrap:wrap}}
 .nine-sum span{{color:#8b949e}}
-@media(max-width:680px){{.nine thead{{display:none}}.nine tr{{display:block;border-bottom:1px solid #21262d;padding:10px 0}}.nine td{{display:block;border:0;padding:3px 0}}.nine td:nth-child(3){{margin-top:4px}}}}
+@media(max-width:680px){{.nine thead{{display:none}}.nine tr{{display:block;border-bottom:1px solid #21262d;padding:10px 0}}.nine td{{display:block;border:0;padding:3px 0}}.nine td:nth-child(3){{margin-top:4px}}.nine-gates{{grid-template-columns:1fr}}}}
 @media(max-width:480px){{.chk .row{{flex-direction:column;gap:2px}}.chk .r{{text-align:left}}}}
 </style></head><body><div class="wrap">
 <h1>资金温度计 · 量价版的行情判定</h1>
