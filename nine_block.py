@@ -151,17 +151,20 @@ def _yi(v):
     return f"{v:+.0f} 亿" if v is not None else "—"
 
 
+def _stance(action):
+    """动作 -> 立场：bull 看多 / neutral 观望 / bear 看空。复合动作按整体归类。"""
+    return {
+        "持有": "bull", "减配": "bear", "等确认": "neutral", "回避": "bear",
+        "防御/控仓": "bear", "进攻": "bull", "中性": "neutral", "防守": "bear",
+        "超配/持有": "bull", "减仓": "bear", "均衡": "neutral",
+        "局部参与/控仓": "neutral", "可参与": "bull", "观望": "neutral",
+        "持有价值": "bull", "转成长": "neutral", "分化对待": "neutral",
+        "观察": "neutral", "卡位": "neutral", "控仓": "neutral",
+    }.get(action, "neutral")
+
+
 def _tone(action):
-    """动作 -> 立场 -> 颜色。复合动作（如「防御/控仓」）按整体归类，不做拆分匹配。"""
-    stance = {
-        "持有": "long", "减配": "short", "等确认": "wait", "回避": "short",
-        "防御/控仓": "short", "进攻": "long", "中性": "wait", "防守": "short",
-        "超配/持有": "long", "减仓": "short", "均衡": "wait",
-        "局部参与/控仓": "wait", "可参与": "long", "观望": "wait",
-        "持有价值": "long", "转成长": "wait", "分化对待": "wait",
-        "观察": "wait", "卡位": "wait", "控仓": "wait",
-    }.get(action, "wait")
-    return {"long": "good", "short": "bad", "wait": "warn"}[stance]
+    return {"bull": "good", "neutral": "warn", "bear": "bad"}[_stance(action)]
 
 
 def build(payload):
@@ -255,6 +258,8 @@ def build(payload):
         act, note = "回避", "成长三条线同步走弱"
     elif (kc.get("chg") or 0) < 0 < (cyb.get("chg") or 0):
         act, note = "等确认", "创业板强、科创50弱，成长内部在换手"
+    elif (kc.get("chg") or 0) > 0 and (cyb.get("chg") or 0) > 0 and (zz1000.get("chg") or 0) < 0:
+        act, note = "等确认", "科创/创业强、中证1000 没跟上，别把小盘当成长"
     else:
         act, note = "持有", "成长内部同向，趋势没坏"
     rows.append({"k": "B", "name": "成长投资", "facts": facts, "action": act, "note": note})
@@ -388,21 +393,55 @@ def build(payload):
     rows.append({"k": "I", "name": "卡位猎手", "facts": facts, "action": act, "note": note})
 
     for r in rows:
-        r["tone"] = _tone(r["action"])
+        r["stance"] = _stance(r["action"])
+        r["tone"] = {"bull": "good", "neutral": "warn", "bear": "bad"}[r["stance"]]
 
-    pos = sum(1 for r in rows if r["tone"] == "good")
-    neg = sum(1 for r in rows if r["tone"] == "bad")
-    neu = len(rows) - pos - neg
-    if pos >= 5:
-        consensus = "偏多派占优，但先看 F/I 两派是否同向，别把小票的反弹当全面回暖"
-    elif neg >= 4:
-        consensus = "偏空派占优，仓位优先于选股，等量能回来再谈进攻"
+    bull = [r["name"] for r in rows if r["stance"] == "bull"]
+    bear = [r["name"] for r in rows if r["stance"] == "bear"]
+    neu = len(rows) - len(bull) - len(bear)
+    # 共识公式借自 UZI-Skill：neutral 按 0.6 计权（既不坑、也不是心头好）
+    cons = round((len(bull) + 0.6 * neu) / len(rows) * 100)
+    if cons >= 80:
+        verdict, vc = "进攻", "good"
+    elif cons >= 65:
+        verdict, vc = "偏多", "good"
+    elif cons >= 50:
+        verdict, vc = "中性", "warn"
+    elif cons >= 35:
+        verdict, vc = "谨慎", "bad"
     else:
-        consensus = "分歧为主，九派没有共识，单看任何一派都容易做错"
+        verdict, vc = "防守", "bad"
+    if bull and bear:
+        split = f"{'、'.join(bull)} 看多 vs {'、'.join(bear)} 看空 —— 分歧本身才是今天的信号"
+    elif bull:
+        split = f"{'、'.join(bull)} 看多，其余观望"
+    elif bear:
+        split = f"{'、'.join(bear)} 看空，其余观望"
+    else:
+        split = "九派全在观望，没有方向"
+
+    macro_bits = []
+    if vol_pct is not None:
+        macro_bits.append(f"量能分位 {vol_pct}%")
+    if flow is not None:
+        macro_bits.append(f"主力 {flow:+.0f} 亿")
+    if ifr.get("rate") is not None:
+        macro_bits.append(f"IF 基差 {ifr['rate']:+.2f}%")
+    if y10:
+        macro_bits.append(f"10Y {y10:.2f}%")
+    gates = {
+        "market": (payload.get("regime") or "—")
+                  + ("（沪深300 在年线下方）" if payload.get("bear") else "（沪深300 在年线上方）"),
+        "macro": " · ".join(macro_bits) or "—",
+        "stop": ("年线下方：底仓≤3成，站回 20 日线补 1/3" if payload.get("bear")
+                 else "年线上方：按计划持有，单笔止损 −8%"),
+    }
     return {
         "date": d,
         "rows": rows,
-        "summary": {"pos": pos, "neg": neg, "neu": neu, "text": consensus},
+        "summary": {"cons": cons, "verdict": verdict, "vc": vc,
+                    "bull": bull, "bear": bear, "neu": neu,
+                    "split": split, "gates": gates},
         "src_flow": flow,
         "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
     }
@@ -413,17 +452,30 @@ def html(d):
         return ('<h2>九流派速扫表</h2><div class="chk">'
                 '<div class="n">今天的九流派数据没取到（休市或接口异常），明天再看。</div></div>')
     s = d.get("summary") or {}
+    g = s.get("gates") or {}
     tr = ""
     for r in d["rows"]:
-        tr += (f'<tr><td class="nine-k"><span class="nine-id">{r["k"]}</span>{r["name"]}</td>'
+        tr += (f'<tr><td class="nine-k"><span class="nine-dot {r["tone"]}"></span>'
+               f'<span class="nine-id">{r["k"]}</span>{r["name"]}</td>'
                f'<td class="nine-f">{r["facts"]}</td>'
                f'<td class="nine-a"><span class="badge {r["tone"]}">{r["action"]}</span>'
                f'<div class="nine-note">{r["note"]}</div></td></tr>')
     return f"""<h2>九流派速扫表 · 每日大盘（{d['date']}）</h2>
-<div class="nine-sum"><b>九派 {s.get('pos', 0)} 偏多 · {s.get('neu', 0)} 观望 · {s.get('neg', 0)} 偏空</b>
-<span>{s.get('text', '')}</span></div>
+<div class="nine-sum"><b class="{s.get('vc', 'warn')}">九派共识 {s.get('cons', 0)} / 100 · {s.get('verdict', '—')}</b>
+<span>看多 {len(s.get('bull') or [])} · 观望 {s.get('neu', 0)} · 看空 {len(s.get('bear') or [])}</span>
+<span>{s.get('split', '')}</span></div>
+<div class="nine-gates">
+<div><b>市况闸</b>{g.get('market', '—')}</div>
+<div><b>宏观闸</b>{g.get('macro', '—')}</div>
+<div><b>止损闸</b>{g.get('stop', '—')}</div>
+</div>
 <div class="card nine-wrap"><table class="nine">
 <thead><tr><th>流派</th><th>今日触发的客观事实（带真实数字）</th><th>动作倾向</th></tr></thead>
 <tbody>{tr}</tbody></table></div>
+<details class="nine-legend"><summary>九派各看什么（口径说明）</summary>
+<div class="sub">A 价值：红利/金融/消费的相对强弱与 60 日线；B 成长：科创50/创业板/中证1000 的内部分化；
+C 宏观：成交额、量能分位、主力资金、国债、IF 基差；D 技术：上证日内位置与均线；E 机构：消费+金融+龙头；
+F 游资：涨停/跌停与赚钱效应；G 量化：价值−成长价差、大小盘价差、PE 分位；H 科技：芯片/信息技术+龙头；
+I 卡位：大小盘涨家差、成交集中度、60 日位置。</div></details>
 <div class="sub">口径：涨跌停按板分层（主板 10% / 双创 20% / 北交所 30% / ST 5%）；「涨家占比」不含平盘；成交额为沪深 A 股合计；
 基差为主力合约、分位窗口 250 日；动作倾向是规则映射，不是预测。数据源：腾讯行情 / 东财资金流 / 新浪快照 / 中证指数 / 中债。生成 {d.get('ts', '')}</div>"""
