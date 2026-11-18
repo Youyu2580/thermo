@@ -125,17 +125,17 @@ def _flow_yi(secid):
     return float(parts[1]) / 1e8
 
 
-def _prev_daily():
+def _prev_payload():
     """上一版数据：本地优先（本机调试），否则读线上 Pages（云端没有 site/ 历史）。"""
     try:
         with open("site/data.json", encoding="utf-8") as f:
-            return (json.load(f) or {}).get("daily") or {}
+            return json.load(f) or {}
     except Exception:
         pass
     try:
         txt = _get("https://youyu2580.github.io/thermo/data.json",
                    "https://youyu2580.github.io/", timeout=8, tries=1)
-        return (json.loads(txt) or {}).get("daily") or {}
+        return json.loads(txt) or {}
     except Exception:
         return {}
 
@@ -204,11 +204,19 @@ def build(payload):
     except Exception:
         flow = None
 
-    # 成交额：daily_block 的沪深 A 股合计（亿元），对比上一版
+    # 成交额：daily_block 的沪深 A 股合计（亿元）。只有上一版是更早的交易日才做日环比；
+    # 同一天手动重跑时 Pages 已经是今天的数据，再比就是自己比自己（0 亿、1.00 倍）。
     amt = daily.get("amt")
-    amt_prev = (_prev_daily() or {}).get("amt")
-    amt_ratio = (amt / amt_prev) if (amt and amt_prev) else None
-    d_amt = (amt - amt_prev) if (amt and amt_prev) else None
+    prev = _prev_payload()
+    prev_amt = (prev.get("daily") or {}).get("amt")
+    prev_date = prev.get("date")
+    if amt and prev_amt and prev_date and prev_date != d:
+        amt_ratio = amt / prev_amt
+        d_amt = amt - prev_amt
+    else:
+        amt_ratio, d_amt = None, None
+    # 日环比拿不到时退回指数口径量比（沪深300 今日成交额 / 20 日均额）
+    vol_ratio = amt_ratio if amt_ratio is not None else today.get("amt_ratio")
 
     cur = daily.get("curve") or {}
     tier = {t.get("name"): t for t in (daily.get("tiers") or [])}
@@ -267,9 +275,12 @@ def build(payload):
     # C 宏观策略：量 + 资金 + 利率 + 贴水
     parts = []
     if amt:
-        chg_txt = f"，{_yi(d_amt)}" if d_amt is not None else ""
-        ratio_txt = f"，环比 {amt_ratio:.2f}" if amt_ratio is not None else ""
-        parts.append(f"两市成交 {amt:.0f} 亿{chg_txt}{ratio_txt}")
+        if d_amt is not None:
+            parts.append(f"两市成交 {amt:.0f} 亿，{_yi(d_amt)}，环比 {amt_ratio:.2f}")
+        elif today.get("amt_ratio") is not None:
+            parts.append(f"两市成交 {amt:.0f} 亿，沪深300 量比 {today['amt_ratio']:.2f}")
+        else:
+            parts.append(f"两市成交 {amt:.0f} 亿")
     if vol_pct is not None:
         parts.append(f"20 日量能分位 {vol_pct}%")
     if flow is not None:
@@ -279,9 +290,9 @@ def build(payload):
     if ifr.get("rate") is not None:
         parts.append(f"IF 基差 {ifr['rate']:+.2f}%（{ifr.get('pct', '—')}% 分位）")
     facts = "；".join(parts) if parts else "成交额 / 利率 / 基差均未取到"
-    if flow is not None and flow < 0 and amt_ratio is not None and amt_ratio < 1:
+    if flow is not None and flow < 0 and vol_ratio is not None and vol_ratio < 1:
         act, note = "防御/控仓", "缩量 + 主力净流出，先控仓等放量"
-    elif flow is not None and flow > 0 and amt_ratio is not None and amt_ratio > 1.1:
+    elif flow is not None and flow > 0 and vol_ratio is not None and vol_ratio > 1.1:
         act, note = "进攻", "放量 + 主力净流入，风险偏好回升"
     elif flow is not None and flow <= -100:
         act, note = "防御/控仓", "主力净流出超百亿，先控仓"
