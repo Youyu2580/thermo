@@ -208,8 +208,11 @@ def build(payload):
     # 同一天手动重跑时 Pages 已经是今天的数据，再比就是自己比自己（0 亿、1.00 倍）。
     amt = daily.get("amt")
     prev = _prev_payload()
-    prev_amt = (prev.get("daily") or {}).get("amt")
-    prev_date = prev.get("date")
+    prev_daily = prev.get("daily") or {}
+    prev_amt = prev_daily.get("amt")
+    # 用「成交额自己那一天」判断，而不是整页的 date：11-20 那版 date=11-19 但 amt 是 11-20 的，
+    # 拿 page date 比会算出一条假的「+0 亿、环比 1.00」。
+    prev_date = prev_daily.get("date") or prev.get("date")
     if amt and prev_amt and prev_date and prev_date != d:
         amt_ratio = amt / prev_amt
         d_amt = amt - prev_amt
