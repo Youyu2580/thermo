@@ -21,14 +21,10 @@ try:
 except Exception:  # noqa
     nine_block = None
 
-SINA = {  # 备用源：新浪（无成交额字段，用成交量代替）
-    "1.000300": "sh000300", "1.000922": "sh000922", "1.000985": "sh000985",
-    "1.588000": "sh588000", "1.512480": "sh512480", "1.515000": "sh515000",
-    "1.512660": "sh512660", "0.159992": "sz159992", "1.516160": "sh516160",
-    "1.512400": "sh512400", "1.512880": "sh512880", "1.512690": "sh512690",
-    "1.512800": "sh512800", "1.515180": "sh515180", "1.510300": "sh510300",
-}
-USED_SINA = []
+# 新浪当日快照：只用来拿「最近交易日」和「当日成交额」，
+# 给中证官网的日线补最后一根（中证官网要等当晚才出当日数据）。
+SNAP = {"000300": "sh000300", "000922": "sh000922", "000985": "sh000985"}
+LIVE_JSON = "https://youyu2580.github.io/thermo/data.json"
 
 HDR = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
@@ -51,6 +47,8 @@ SECTORS = [
 ]
 TENCENT = {"000300": "sh000300", "000922": "sh000922", "000985": "sh000985",
            "000688": "sh000688", "399967": "sz399967", "000935": "sh000935",
+           "000932": "sh000932", "000928": "sh000928", "000930": "sh000930",
+           "000934": "sh000934", "000933": "sh000933",
            "H30184": "shH30184"}
 
 
@@ -96,21 +94,111 @@ def _fetch_cs(code, days=1500):
 
 
 def _fetch_tencent(code, lmt):
+    """腾讯日线：收盘后即可拿到当日数据，但只有成交量、没有成交额（amt 置 None，
+    绝不能拿成交量当成交额去算占比，两者差 5~6 个数量级）。
+
+    web.ifzq 偶发 501，ifzq 主域更稳，两个都试（nine_block 早已这么干）。
+    """
     sym = TENCENT.get(code)
     if not sym:
         return []
-    url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
-           f"param={sym},day,,,{min(lmt, 800)},qfq")
-    req = urllib.request.Request(url, headers=HDR)
-    with urllib.request.urlopen(req, timeout=15) as r:
-        obj = json.loads(r.read().decode("utf-8"))
-    node = (obj.get("data") or {}).get(sym) or {}
-    ks = node.get("day") or node.get("qfqday") or []
-    out = []
-    for x in ks[-lmt:]:
-        v = float(x[5]) if len(x) > 5 and x[5] not in ("", "-") else 0.0
-        out.append({"d": x[0].replace("-", ""), "close": float(x[2]), "vol": v, "amt": v})
+    last_err = None
+    for host in ("https://ifzq.gtimg.cn", "https://web.ifzq.gtimg.cn"):
+        try:
+            url = (f"{host}/appstock/app/fqkline/get?"
+                   f"param={sym},day,,,{min(lmt, 800)},qfq")
+            req = urllib.request.Request(url, headers=HDR)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                obj = json.loads(r.read().decode("utf-8"))
+            node = (obj.get("data") or {}).get(sym) or {}
+            ks = node.get("day") or node.get("qfqday") or []
+            out = []
+            for x in ks[-lmt:]:
+                d = str(x[0])[:10]
+                if len(d) == 8:
+                    d = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+                v = float(x[5]) if len(x) > 5 and x[5] not in ("", "-") else 0.0
+                out.append({"d": d, "close": float(x[2]), "vol": v, "amt": None})
+            if out:
+                return out
+        except Exception as e:  # noqa
+            last_err = e
+    if last_err:
+        raise last_err
+    return []
+
+
+def _cs_amt_map(code):
+    """中证官网日线 -> {日期: 成交额(亿元)}。官网当晚才更新当日数据，只当成交额底稿。"""
+    return {x["d"]: x["amt"] for x in _fetch_cs(code) if x.get("amt")}
+
+
+def sina_snaps(syms):
+    """新浪当日快照，一次取多个：{sym: {"date","close","amt"}}（amt 单位亿元）。"""
+    url = "https://hq.sinajs.cn/list=" + ",".join(syms)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": HDR["User-Agent"], "Referer": "https://finance.sina.com.cn/"})
+    with urllib.request.urlopen(req, timeout=12) as r:
+        txt = r.read().decode("gbk", "replace")
+    out = {}
+    for line in txt.splitlines():
+        if "=" not in line or '"' not in line:
+            continue
+        sym = line.split("hq_str_")[-1].split("=")[0].strip()
+        f = line.split('"')[1].split(",")
+        if len(f) < 31 or not f[30]:
+            continue
+        try:
+            out[sym] = {"date": f[30], "close": float(f[3]),
+                        "amt": round(float(f[9]) / 1e8, 2) if f[9] else None}
+        except Exception:
+            continue
     return out
+
+
+def em_snaps(codes=("000300", "000922", "000985")):
+    """东财当日快照：{code: {"close","amt"}}（成交额单位亿元）。新浪快照失败时用它补当日成交额。"""
+    secids = ",".join("1." + c for c in codes)
+    url = ("https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=" + secids
+           + "&fields=f2,f3,f6,f12")
+    req = urllib.request.Request(url, headers={
+        "User-Agent": HDR["User-Agent"], "Referer": "https://quote.eastmoney.com/"})
+    with urllib.request.urlopen(req, timeout=12) as r:
+        obj = json.loads(r.read().decode("utf-8"))
+    out = {}
+    for x in ((obj.get("data") or {}).get("diff") or []):
+        try:
+            out[str(x.get("f12"))] = {"close": float(x["f2"]),
+                                      "amt": round(float(x["f6"]) / 1e8, 2)}
+        except Exception:
+            continue
+    return out
+
+
+def after_close(mdate):
+    """当日快照只在收盘后（15:05 起）才当完整成交额用，盘中拿到的是半天量。"""
+    now = datetime.now(TZ)
+    d, hm = now.strftime("%Y-%m-%d"), now.strftime("%H%M")
+    return not (d == mdate and hm < "1505")
+
+
+def market_date():
+    """最近一个已收盘交易日：取新浪快照的日期字段（盘中/盘后都指向最后一个成交日）。"""
+    try:
+        s = sina_snaps(["sh000300"]).get("sh000300") or {}
+        if s.get("date"):
+            return s["date"]
+    except Exception:
+        pass
+    try:
+        url = "https://qt.gtimg.cn/q=sh000300"
+        req = urllib.request.Request(url, headers={"User-Agent": HDR["User-Agent"]})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            f = r.read().decode("gbk", "replace").split('"')[1].split("~")
+        t = f[30][:8]
+        return f"{t[:4]}-{t[4:6]}-{t[6:8]}"
+    except Exception:
+        return None
 
 
 def fetch_index_perf(code, start="20170101"):
@@ -128,18 +216,97 @@ def fetch_index_perf(code, start="20170101"):
     return out
 
 
-def fetch_kline(code, lmt=520):
-    for fn in (_fetch_cs, _fetch_tencent):
-        for attempt in range(2):
+EM_IDX = {"000300": "1.000300", "000922": "1.000922", "000985": "1.000985"}
+
+
+def _fetch_em(code, lmt):
+    """东财日线（带成交额）：腾讯被限流 501 时的第二选择，只在三条宽基/风格指数上用。"""
+    secid = EM_IDX.get(code)
+    if not secid:
+        return []
+    url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
+           f"?secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57"
+           f"&klt=101&fqt=0&end=20500101&lmt={min(lmt, 1000)}")
+    req = urllib.request.Request(url, headers=HDR)
+    with urllib.request.urlopen(req, timeout=15) as r:
+        obj = json.loads(r.read().decode("utf-8"))
+    out = []
+    for k in ((obj.get("data") or {}).get("klines") or []):
+        p = str(k).split(",")
+        if len(p) < 7:
+            continue
+        try:
+            out.append({"d": p[0], "close": float(p[2]), "vol": float(p[5] or 0),
+                        "amt": round(float(p[6]) / 1e8, 2) if p[6] else None})
+        except Exception:
+            continue
+    return out
+
+
+SRC_LOG = {}
+
+
+def fetch_kline(code, lmt=520, want=None):
+    """价格序列，三源串联：腾讯 → 东财 → 中证官网。
+
+    拿到的最后一根如果已经是 want（最近交易日）就立刻收工；否则继续问下一个源，
+    最后取「日期最新」的那一条。腾讯只有收盘价没有成交额，成交额走另一条链。
+
+    ⚠ 顺序不能反。2026-11-20 的教训：先打中证官网时，16:41 那次跑只拿到 11-19，
+    整页日期跟着退回 T-1，而宽度/基差/上证都是 11-20，同页混两天。
+    """
+    best = None
+    for name, call in (("腾讯", lambda: _fetch_tencent(code, lmt)),
+                       ("东财", lambda: _fetch_em(code, lmt)),
+                       ("中证官网", lambda: _fetch_cs(code))):
+        got = None
+        for _ in range(2):
             try:
-                out = fn(code, lmt) if fn is _fetch_tencent else fn(code)
+                out = call()
                 if len(out) >= 60:
-                    return out[-lmt:]
+                    got = out[-lmt:]
+                    break
             except Exception:
                 pass
-            time.sleep(1.0)
-    print(f"[warn] {code} 取数失败")
-    return []
+            time.sleep(0.5)
+        if got is None:
+            continue
+        d = got[-1]["d"]
+        if best is None or d > best[1]:
+            best = (name, d, got)
+        if not want or d >= want:  # 没指定目标日 / 已经够新了，收工
+            break
+    if best is None:
+        SRC_LOG[code] = "失败"
+        print(f"[warn] {code} 取数失败")
+        return []
+    SRC_LOG[code] = best[0]
+    return best[2]
+
+
+_PREV = [None]
+
+
+def prev_payload():
+    """上一版页面数据。云端 checkout 里没有 site/，所以先本地、再回读线上 Pages。"""
+    if _PREV[0] is not None:
+        return _PREV[0]
+    try:
+        with open("site/data.json", encoding="utf-8") as f:
+            _PREV[0] = json.load(f) or {}
+    except Exception:
+        _PREV[0] = {}
+    if not _PREV[0]:
+        try:
+            req = urllib.request.Request(
+                LIVE_JSON + "?t=" + str(int(time.time())),
+                headers={"User-Agent": HDR["User-Agent"], "Cache-Control": "no-cache"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                _PREV[0] = json.loads(r.read().decode("utf-8")) or {}
+            print("[info] 上一版数据取自线上 Pages")
+        except Exception as e:  # noqa
+            print(f"[warn] 上一版数据取不到：{e}")
+    return _PREV[0]
 
 
 def ma(arr, n):
@@ -156,9 +323,11 @@ def pctile(arr, v):
 
 def main():
     data = {}
-    # 统一优先腾讯源：成交量口径固定，避免东财/腾讯来回切导致量能分位跳变
+    # 价格序列统一走腾讯（15:00 后即有 T 日收盘），成交额另走「中证官网日线 + 新浪当日快照」
+    # 最近交易日（快照口径）先定下来：价格源要拿到这一天，拿不到就让位给下一个源
+    mdate = market_date()
     for k, (code, name) in IDX.items():
-        data[k] = fetch_kline(code, 520)
+        data[k] = fetch_kline(code, 520, want=mdate)
     hs, dv, al = data["hs300"], data["div"], data["all"]
     if not hs or not dv:
         raise SystemExit("核心指数取数失败，稍后重试")
@@ -168,24 +337,61 @@ def main():
     last = c300[-1]
     ma20, ma60, ma200, ma250 = ma(c300, 20), ma(c300, 60), ma(c300, 200), ma(c300, 250)
 
+    # 沪深300 与中证红利按「日期」对齐：任何一条落到 T-1 时，比值/涨幅都不会错位一天
+    hs_by_d = {x["d"]: x["close"] for x in hs}
+    dv_by_d = {x["d"]: x["close"] for x in dv}
+    cd = sorted(set(hs_by_d) & set(dv_by_d))
+
+    # 成交额：中证官网日线当底稿（当晚才更新），再用当日快照补上「官网还没出的今天」。
+    # 只用成交额（亿元），绝不把成交量混进来——混了会让量能分位/红利占比差好几个数量级。
+    amts = {}
+    for code in ("000300", "000922", "000985"):
+        try:
+            amts[code] = _cs_amt_map(code)
+        except Exception as e:  # noqa
+            print(f"[warn] {code} 成交额取数失败：{e}")
+            amts[code] = {}
+    if mdate and after_close(mdate):
+        patched = set()
+        # 东财快照一次给三条指数，数值与中证官网 tradingValue 一致（4411.08 亿对得上）
+        try:
+            for code, s in (em_snaps() or {}).items():
+                if code in amts and s.get("amt") and (not amts[code] or mdate > max(amts[code])):
+                    amts[code][mdate] = s["amt"]
+                    patched.add(code)
+        except Exception as e:  # noqa
+            print(f"[warn] 东财快照失败：{e}")
+        if "000300" not in patched:  # 新浪只有 000300 有效，兜底用
+            try:
+                s = sina_snaps([SNAP["000300"]]).get(SNAP["000300"]) or {}
+                if s.get("amt") and (not amts["000300"] or mdate > max(amts["000300"])):
+                    amts["000300"][mdate] = s["amt"]
+                    patched.add("000300")
+            except Exception as e:  # noqa
+                print(f"[warn] 新浪快照失败：{e}")
+        if patched:
+            print(f"[info] 成交额补当日 {mdate}：{'、'.join(sorted(patched))}")
+    amt_asof = max(amts["000300"]) if amts.get("000300") else None
+    ams = [amts["000300"][d] for d in sorted(amts.get("000300") or {})]
+
     # 量能分位：20日均额 在过去一年 20日均额分布中的分位
-    amt = [x["amt"] for x in hs]
-    avg20 = [sum(amt[i - 19:i + 1]) / 20 for i in range(19, len(amt))]
-    vol_pct = pctile(avg20[-250:] if len(avg20) >= 250 else avg20, avg20[-1])
+    avg20 = [sum(ams[i - 19:i + 1]) / 20 for i in range(19, len(ams))]
+    vol_pct = pctile(avg20[-250:] if len(avg20) >= 250 else avg20, avg20[-1]) if avg20 else None
 
     # 当日快照：涨跌、量比、离均线位置
     today = {}
     try:
         chg = (c300[-1] / c300[-2] - 1) * 100
-        base = sum(amt[-21:-1]) / 20 if len(amt) > 21 else amt[-1]
-        amt_ratio = amt[-1] / base if base else 1.0
-        div_chg = (cdiv[-1] / cdiv[-2] - 1) * 100
+        base = sum(ams[-21:-1]) / 20 if len(ams) > 21 else (ams[-1] if ams else 0)
+        amt_ratio = (ams[-1] / base) if (ams and base) else None
+        div_chg = (dv_by_d[cd[-1]] / dv_by_d[cd[-2]] - 1) * 100 if len(cd) > 1 else 0.0
         sig = "常态波动"
-        if abs(chg) >= 2 and amt_ratio >= 1.3:
+        if abs(chg) >= 2 and (amt_ratio or 0) >= 1.3:
             sig = "放量变盘" + ("（向上）" if chg > 0 else "（向下）")
         elif abs(chg) >= 2:
             sig = "单日异动（未放量）"
-        today = {"chg": round(chg, 2), "amt_ratio": round(amt_ratio, 2),
+        today = {"chg": round(chg, 2),
+                 "amt_ratio": round(amt_ratio, 2) if amt_ratio is not None else None,
                  "div_chg": round(div_chg, 2), "rel": round(div_chg - chg, 2),
                  "above20": round((last / ma20 - 1) * 100, 2),
                  "above60": round((last / ma60 - 1) * 100, 2),
@@ -193,41 +399,53 @@ def main():
     except Exception as e:  # noqa
         print(f"[warn] 当日快照失败: {e}")
 
-    # 红利相对强弱：比值与其 60 日线
-    n = min(len(cdiv), len(c300))
-    rs = [cdiv[len(cdiv) - n + i] / c300[len(c300) - n + i] for i in range(n)]
+    # 红利相对强弱：比值与其 60 日线（按日期对齐，不用位置对齐）
+    rs = [dv_by_d[d] / hs_by_d[d] for d in cd] or [1.0]
     rs_ma20, rs_ma60 = ma(rs, 20), ma(rs, 60)
     rs_now = rs[-1]
     rs_5d = round((rs_now / rs[-6] - 1) * 100, 2) if len(rs) > 6 else None
     rs_20d = round((rs_now / rs[-21] - 1) * 100, 2) if len(rs) > 21 else None
 
-    # 红利成交占比（相对全市场）
+    # 红利成交额占比（中证红利 / 中证全指，同一套成交额口径，按日期对齐）
     share = None
     share_5d = None
-    if al:
-        m = min(len(dv), len(al))
-        r = [dv[len(dv) - m + i]["amt"] / al[len(al) - m + i]["amt"] for i in range(m)]
+    share_asof = None
+    try:
+        a_dv = amts.get("000922") or {}
+        a_al = amts.get("000985") or {}
+        md = [d for d in sorted(a_dv) if a_al.get(d)]
+        r = [a_dv[d] / a_al[d] for d in md]
         if r and r[-1] > 0:
             share = round(ma(r, 20) * 100, 2)
             share_5d = round((r[-1] / r[-6] - 1) * 100, 2) if len(r) > 6 else None
+            share_asof = md[-1]
+    except Exception as e:  # noqa
+        print(f"[warn] 红利成交额占比失败: {e}")
 
-    # 进攻侧：20 日超额收益排名
-    r300_20 = c300[-1] / c300[-21] - 1 if len(c300) > 21 else 0
-    r300_5 = c300[-1] / c300[-6] - 1 if len(c300) > 6 else 0
+    # 进攻侧：20 日超额收益排名（按日期对齐，某条指数滞后一天时也不会错位）
+    hs_close = {x["d"]: x["close"] for x in hs}
     rows = []
     for secid, name in SECTORS:
         try:
             k = fetch_kline(secid, 120)
             if len(k) < 25:
                 continue
-            c = [x["close"] for x in k]
-            r20 = c[-1] / c[-21] - 1
-            r5 = c[-1] / c[-6] - 1
+            sc = {x["d"]: x["close"] for x in k}
+            common = sorted(set(sc) & set(hs_close))
+            if len(common) < 25:
+                continue
+            c = [sc[d] for d in common]
+            b = [hs_close[d] for d in common]
+            r5 = c[-1] / c[-6] - 1 if len(c) > 6 else 0
+            b20 = b[-1] / b[-21] - 1 if len(b) > 21 else 0
+            b5 = b[-1] / b[-6] - 1 if len(b) > 6 else 0
+            r20 = c[-1] / c[-21] - 1 if len(c) > 21 else 0
+            hi, lo = max(c[-60:]), min(c[-60:])
             rows.append({
                 "name": name,
-                "r20": round((r20 - r300_20) * 100, 2),
-                "r5": round((r5 - r300_5) * 100, 2),
-                "pos": round((c[-1] - min(c[-60:])) / (max(c[-60:]) - min(c[-60:])) * 100) if len(c) >= 60 else None,
+                "r20": round((r20 - b20) * 100, 2),
+                "r5": round((r5 - b5) * 100, 2),
+                "pos": round((c[-1] - lo) / (hi - lo) * 100) if len(c) >= 60 and hi > lo else None,
             })
         except Exception as e:  # noqa
             print(f"[warn] {name} 失败: {e}")
@@ -262,16 +480,13 @@ def main():
         val = {"pe": round(cur, 2), "mean": round(mean, 2),
                "hi": round(mean + sd, 2), "lo": round(mean - sd, 2),
                "pct": pctile(pe, cur), "start": series[0][0], "n": len(series),
+               "asof": series[-1][0],
                "series": [round(x[1], 2) for x in weekly]}
     if not val.get("pe"):
-        try:
-            with open("site/data.json", encoding="utf-8") as f:
-                prev = (json.load(f) or {}).get("val") or {}
-            if prev.get("pe"):
-                val = prev
-                print("[warn] 估值取数失败，沿用上次数据")
-        except Exception:
-            pass
+        prev = (prev_payload().get("val") or {})
+        if prev.get("pe"):
+            val = prev
+            print("[warn] 估值取数失败，沿用上次数据")
     for code, key in (("000300", "pe300"), ("000934", "pe_bank")):
         val[key] = None
         try:
@@ -281,9 +496,12 @@ def main():
         except Exception as e:  # noqa
             print(f"[warn] {code} 估值失败: {e}")
 
+    used = sorted({v for v in SRC_LOG.values() if v and v != "失败"})
     payload = {
         "updated": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
         "date": hs[-1]["d"],
+        "market_date": mdate,
+        "amt_asof": amt_asof,
         "px": round(last, 2),
         "ma20": round(ma20, 2), "ma60": round(ma60, 2),
         "ma200": round(ma200, 2), "ma250": round(ma250, 2),
@@ -292,11 +510,11 @@ def main():
         "rs": round(rs_now, 4), "rs_ma60": round(rs_ma60, 4),
         "rs_above": rs_now > rs_ma60,
         "rs_5d": rs_5d, "rs_20d": rs_20d,
-        "share": share, "share_5d": share_5d,
+        "share": share, "share_5d": share_5d, "share_asof": share_asof,
         "share_unit": "成交额",
         "regime": regime, "tone": tone, "bear": bear,
         "sectors": rows,
-        "src_note": "",
+        "src_note": ("（价格源：" + "、".join(used) + "；成交额：中证官网+新浪快照）") if used else "",
         "rs_series": [round(x, 4) for x in rs[-120:]],
         "rs_ma_series": [round(x, 4) for x in [ma(rs[:i + 1], 60) or rs[i] for i in range(len(rs) - 120, len(rs))]],
         "dates": [x["d"][5:] for x in dv[-120:]],
@@ -306,7 +524,7 @@ def main():
     os.makedirs("site", exist_ok=True)
     if daily_block:
         try:
-            payload["daily"] = daily_block.build()
+            payload["daily"] = daily_block.build(mdate)
         except Exception as e:  # noqa
             print(f"[warn] 每日体检取数失败: {e}")
     if basis_block:
@@ -314,34 +532,28 @@ def main():
             payload["basis"] = basis_block.build()
         except Exception as e:  # noqa
             print(f"[warn] 期指基差取数失败: {e}")
-            try:
-                with open("site/data.json", encoding="utf-8") as f:
-                    prev = (json.load(f) or {}).get("basis") or {}
-                if prev.get("rows"):
-                    payload["basis"] = prev
-                    print("[warn] 期指基差沿用上次数据")
-            except Exception:
-                pass
+            prev = (prev_payload().get("basis") or {})
+            if prev.get("rows"):
+                payload["basis"] = prev
+                print("[warn] 期指基差沿用上次数据")
     if nine_block:
         try:
             payload["nine"] = nine_block.build(payload)
         except Exception as e:  # noqa
             print(f"[warn] 九流派取数失败: {e}")
-            try:
-                with open("site/data.json", encoding="utf-8") as f:
-                    prev = (json.load(f) or {}).get("nine") or {}
-                if prev.get("rows"):
-                    payload["nine"] = prev
-                    print("[warn] 九流派沿用上次数据")
-            except Exception:
-                pass
+            prev = (prev_payload().get("nine") or {})
+            if prev.get("rows"):
+                payload["nine"] = prev
+                print("[warn] 九流派沿用上次数据")
     with open("site/data.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1)
 
     html = render(payload)
     with open("site/index.html", "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"DONE {payload['date']} {regime} px={payload['px']} rs_above={payload['rs_above']} vol={vol_pct}")
+    lag = "" if (not mdate or mdate == payload["date"]) else f" ⚠数据日期≠最近交易日({mdate})"
+    print(f"DONE {payload['date']} {regime} px={payload['px']} rs_above={payload['rs_above']} "
+          f"vol={vol_pct} amt_asof={amt_asof}{lag}")
 
 
 def svg_path(vals, w=560, h=120):
@@ -359,8 +571,9 @@ def top_cards(p):
     """顶部四卡：量能 / 红利相对强度 / 均线位置 / 估值——一屏看完所有结论"""
     t = p.get("today") or {}
     v = p.get("val") or {}
-    vol = p.get("vol_pct") or 0
-    tone_vol = "good" if vol >= 60 else "warn" if vol >= 35 else "bad"
+    vol = p.get("vol_pct")
+    tone_vol = "dim" if vol is None else ("good" if vol >= 60 else "warn" if vol >= 35 else "bad")
+    vol_txt = "—" if vol is None else f"{vol}%"
     ratio = t.get("amt_ratio")
     ratio_txt = f"今日量比 {ratio:.2f} 倍" if ratio is not None else "今日量比 —"
     rs5, rs20 = p.get("rs_5d"), p.get("rs_20d")
@@ -375,13 +588,21 @@ def top_cards(p):
     share_5d = f"{s5:+.1f}%" if s5 is not None else "—"
     if pe:
         coef = 0.5 if pct >= 80 else (0.75 if pct >= 60 else (1.25 if pct <= 20 else 1.0))
-        pe_txt, pe_note = f"{pe} · {pct}%", f"2017 至今分位 · 单笔仓位 ×{coef}"
+        pe_asof = f" · 截至 {v['asof']}" if v.get("asof") and v.get("asof") != p.get("date") else ""
+        pe_txt = f"{pe} · {pct}%"
+        pe_note = f"2017 至今分位 · 单笔仓位 ×{coef}{pe_asof}"
     else:
         pe_txt, pe_note = "—", "估值取数失败"
+    amt_note = ""
+    if p.get("amt_asof") and p.get("amt_asof") != p.get("date"):
+        amt_note = f"（成交额截至 {p['amt_asof']}）"
+    share_note = ""
+    if p.get("share_asof") and p.get("share_asof") != p.get("date"):
+        share_note = f" · 截至 {p['share_asof']}"
     return f"""<div class="grid">
-  <div class="card"><div class="k">大盘量能（20日均额分位）</div><div class="v {tone_vol}">{vol}%<small>{ratio_txt}</small></div></div>
+  <div class="card"><div class="k">大盘量能（20日均额分位）</div><div class="v {tone_vol}">{vol_txt}<small>{ratio_txt}{amt_note}</small></div></div>
   <div class="card"><div class="k">红利相对强度（vs 60日线）</div><div class="v"><span class="{rs_cls}">{rs_lbl}</span><small>5日 {rs_5} · 20日 {rs_20}</small></div></div>
-  <div class="card"><div class="k">红利{p["share_unit"]}占比（20日均）</div><div class="v" style="font-size:20px">{share_txt}<small>20日均 · 5日 {share_5d}</small></div></div>
+  <div class="card"><div class="k">红利{p["share_unit"]}占比（20日均）</div><div class="v" style="font-size:20px">{share_txt}<small>20日均 · 5日 {share_5d}{share_note}</small></div></div>
   <div class="card"><div class="k">中证全指 PE / 历史分位</div><div class="v" style="font-size:20px">{pe_txt}<small>{pe_note}</small></div></div>
 </div>"""
 
@@ -434,13 +655,13 @@ def render(p):
         nine_html = nine_block.html(p.get("nine") or {}) if nine_block else ""
     except Exception:
         nine_html = ""
+    # 数据日期 ≠ 最近交易日 → 页首红条。宁可刺眼，也别让人拿着昨天的结论做今天的决定。
+    md = p.get("market_date") or ""
+    lag_html = ""
+    if md and md != p.get("date"):
+        lag_html = (f'<div class="alert">⚠ 本页主数据是 <b>{p.get("date")}</b>，最近交易日 <b>{md}</b> 已有收盘'
+                    f'——结论是按旧日期算的，今天别照着做。</div>')
     lag_note = ""
-    try:
-        dd = ((p.get("daily") or {}).get("curve") or {}).get("date") or ""
-        if dd and dd != p["date"]:
-            lag_note = "（指数数据滞后一天，体检板块是最新的）"
-    except Exception:
-        lag_note = ""
     ma_d = svg_path(p["rs_ma_series"])
     lo = min(p["rs_series"]); hi = max(p["rs_series"])
     sec_html = ""
@@ -476,11 +697,13 @@ h1{{font-size:18px;font-weight:600;margin:0 0 4px}}
 .k{{color:#8b949e;font-size:12px}}
 .v{{font-size:22px;font-weight:600;margin-top:4px}}
 .v small{{display:block;font-size:12px;color:#8b949e;font-weight:400;margin-top:6px}}
-.good{{color:#2fd47a}} .bad{{color:#ff6b6b}} .warn{{color:#f0b429}}
+/* 配色口径（A 股）：红=涨/强/热/贵，绿=跌/弱/冷/便宜，黄=中性/注意。
+   红绿只表达「强弱」一个维度，不再兼任「好/坏」。 */
+.good{{color:#ff6b6b}} .bad{{color:#2fd47a}} .warn{{color:#f0b429}}
 table{{width:100%;border-collapse:collapse;margin-top:6px;font-size:14px}}
 th{{text-align:left;color:#8b949e;font-weight:500;font-size:12px;padding:8px 6px;border-bottom:1px solid #30363d}}
 td{{padding:8px 6px;border-bottom:1px solid #21262d}}
-.rk{{color:#8b949e;width:28px}} .up{{color:#2fd47a}} .dn{{color:#ff6b6b}} .dim{{color:#8b949e}}
+.rk{{color:#8b949e;width:28px}} .up{{color:#ff6b6b}} .dn{{color:#2fd47a}} .dim{{color:#8b949e}}
 svg{{width:100%;height:130px;margin-top:8px}}
 .foot{{color:#6e7681;font-size:12px;margin-top:28px}}
 details{{margin:10px 0;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:10px 16px}}
@@ -504,7 +727,7 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 .nine td{{vertical-align:top}}
 .nine-id{{display:inline-block;width:18px;height:18px;line-height:18px;text-align:center;border-radius:4px;background:#21262d;color:#8b949e;font-size:11px;margin-right:6px}}
 .nine-dot{{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}}
-.nine-dot.good{{background:#2fd47a}}.nine-dot.bad{{background:#ff6b6b}}.nine-dot.warn{{background:#f0b429}}
+.nine-dot.good{{background:#ff6b6b}}.nine-dot.bad{{background:#2fd47a}}.nine-dot.warn{{background:#f0b429}}
 .nine-gates{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:10px 0}}
 .nine-gates>div{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px 12px;font-size:12px;color:#c9d1d9;line-height:1.5}}
 .nine-gates b{{display:block;color:#8b949e;font-weight:500;font-size:11px;margin-bottom:2px}}
@@ -517,6 +740,7 @@ h2{{font-size:14px;color:#8b949e;font-weight:500;margin:26px 0 8px}}
 </style></head><body><div class="wrap">
 <h1>资金温度计 · 量价版的行情判定</h1>
 <div class="sub">数据截至 {p['date']} 收盘{lag_note} · 生成于 {p['updated']} · 仅供自己复盘，不构成投资建议</div>
+{lag_html}
 <div class="hero">
   <div class="regime">{p['regime']} · {label}</div>
   <div class="verdict">沪深300 {p['px']}（{p['above200']:+.1f}% vs 200日线）· 红利/300 比值{'站上' if p['rs_above'] else '跌破'} 60日线</div>
