@@ -19,6 +19,26 @@ CTX = ssl.create_default_context()
 CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
 SLEEP = [0.0]
+LIVE_JSON = "https://youyu2580.github.io/thermo/data.json"
+_PREV = [None]
+
+
+def _prev_json():
+    """上一版 data.json：先本地，再回读线上 Pages（云端 checkout 没有 site/）。"""
+    if _PREV[0] is not None:
+        return _PREV[0]
+    try:
+        with open("site/data.json", encoding="utf-8") as f:
+            _PREV[0] = json.load(f) or {}
+    except Exception:
+        _PREV[0] = {}
+    if not _PREV[0]:
+        try:
+            _PREV[0] = json.loads(_get(LIVE_JSON + "?t=%d" % int(time.time()),
+                                       "https://youyu2580.github.io/", timeout=20))
+        except Exception:
+            _PREV[0] = {}
+    return _PREV[0]
 
 
 def _get(url, ref, timeout=25, tries=3):
@@ -262,8 +282,11 @@ def ma20_breadth(syms, target=2400, budget=420, workers=28, min_cov=0.7):
         return None
     return {"pct": round(hit / ok * 100, 1), "n": ok}
 
-def build():
+def build(md=None):
+    """md = 最近交易日（由 update.py 用新浪快照判定），用来给体检块标「数据截至哪天」。"""
     d = {"ok": False}
+    if md:
+        d["date"] = md
     rows = []
     try:
         rows = fetch_stocks()
@@ -350,16 +373,13 @@ def build():
         except Exception as e:
             d["err_ma20"] = f"{type(e).__name__}"
         if not d.get("ma20"):
-            # 兜底：沿用上一次成功算出的 MA20 占比，并打上 stale 标记，避免档位悄悄变松
-            try:
-                with open("site/data.json", encoding="utf-8") as f:
-                    pm = ((json.load(f) or {}).get("daily") or {}).get("ma20") or {}
-                if pm.get("pct") is not None:
-                    pm = dict(pm)
-                    pm["stale"] = True
-                    d["ma20"] = pm
-            except Exception:
-                pass
+            # 兜底：沿用上一次成功算出的 MA20 占比，并打上 stale 标记，避免档位悄悄变松。
+            # 云端 checkout 里没有 site/，所以要回读线上 Pages 的 data.json。
+            pm = (_prev_json().get("daily") or {}).get("ma20") or {}
+            if pm.get("pct") is not None:
+                pm = dict(pm)
+                pm["stale"] = True
+                d["ma20"] = pm
 
     try:
         cs = curve_stats(fetch_curve())
@@ -448,14 +468,16 @@ def html(d):
                          f'前 5% 的票吃掉 {d["conc"]:.0f}% 成交额',
                          "钱很挤，别追没人管的票" if d["conc"] >= 42 else "钱比较分散"))
 
-    dt = (d.get("curve") or {}).get("date") or ""
+    dt = d.get("date") or (d.get("curve") or {}).get("date") or ""
+    cd = (d.get("curve") or {}).get("date") or ""
+    curve_note = f" · 国债曲线截至 {cd}" if cd and dt and cd != dt else ""
     return (
         '<h2>每日体检 · 白话版（收盘后 3 分钟）</h2>'
         '<div class="chk">'
         f'<div class="chk-top"><span class="badge {wc}">{wx}</span>'
         f'<span class="chk-act">今天：{act}</span></div>'
         + "".join(rows) +
-        f'<div class="chk-foot">数据截至 {dt} 收盘 · 全市场 {d.get("n")} 只（含北交所）· '
+        f'<div class="chk-foot">数据截至 {dt} 收盘{curve_note} · 全市场 {d.get("n")} 只（含北交所）· '
         f'生成 {d.get("ts")} · 只描述今天发生了什么，不预测涨跌；动作只有「减 / 不动」，没有「买」。'
         '</div></div>'
     )
