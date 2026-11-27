@@ -2,7 +2,7 @@ name: daily-thermo
 
 on:
   schedule:
-    - cron: "35 7,8 * * 1-5"   # 15:35 / 16:35 北京时间各跑一次：GitHub 定时任务常延迟，跑两次兜底
+    - cron: "35 8,10 * * 1-5"   # 北京 16:35 / 18:35 各一次：16:35 出当天行情，18:35 补中证 PE 与国债曲线（这两项 17 点后才出当天数）
   workflow_dispatch:
 
 permissions:
