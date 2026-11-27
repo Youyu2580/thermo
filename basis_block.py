@@ -54,37 +54,103 @@ def _third_friday(y, m):
     return d + timedelta(days=14)
 
 
+KLINE_HOSTS = (
+    "https://stock2.finance.sina.com.cn",
+    "https://stock.finance.sina.com.cn",
+)
+_ERRS = set()          # 取数失败原因（去重）；全失败时一起抛出去，不许静默
+
+
 def _kline(sym):
-    """单个合约日线：[(date, close, oi), ...]"""
-    url = ("https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_=/"
-           "InnerFuturesNewService.getDailyKLine?symbol=" + sym)
-    try:
-        txt = _get(url, "https://finance.sina.com.cn/", enc="gbk")
-    except Exception:
-        return []
-    m = re.search(r"\((\[.*\])\)", txt, re.S)
-    if not m:
-        return []
-    try:
-        rows = json.loads(m.group(1))
-    except Exception:
-        return []
-    out = []
-    for r in rows:
+    """单个合约日线：[(date, close, oi), ...]；两个新浪域名轮流试。"""
+    for host in KLINE_HOSTS:
+        tag = host.split("//")[-1].split(".")[0]
+        url = (host + "/futures/api/jsonp.php/var%20_=/"
+               "InnerFuturesNewService.getDailyKLine?symbol=" + sym)
         try:
-            out.append((r["d"], float(r["c"]), float(r.get("p") or 0)))
-        except Exception:
+            txt = _get(url, "https://finance.sina.com.cn/", enc="gbk")
+        except Exception as e:
+            _ERRS.add("新浪期货(%s):%s" % (tag, type(e).__name__))
             continue
-    return out
+        m = re.search(r"\((\[.*\])\)", txt, re.S)
+        if not m:
+            if "null" in txt[:300]:
+                return []          # 该月份合约没挂牌/已退市，属正常，别记成故障
+            _ERRS.add("新浪期货(%s):无JSON" % tag)
+            continue
+        try:
+            rows = json.loads(m.group(1))
+        except Exception:
+            _ERRS.add("新浪期货(%s):JSON坏" % tag)
+            continue
+        out = []
+        for r in rows:
+            try:
+                out.append((r["d"], float(r["c"]), float(r.get("p") or 0)))
+            except Exception:
+                continue
+        if out:
+            return out
+        _ERRS.add("新浪期货(%s):空" % tag)
+    return []
 
 
-def _spot(code, beg, end):
-    """现货指数日线 {date: close}"""
+def _spot_em(code, beg, end):
+    """东财指数日线 {date: close}"""
     url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=1." + code +
            "&klt=101&fqt=1&beg=" + beg + "&end=" + end +
            "&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57")
     d = json.loads(_get(url, "https://quote.eastmoney.com/"))["data"]["klines"]
     return {k.split(",")[0]: float(k.split(",")[2]) for k in d}
+
+
+def _spot_tencent(code, beg, end):
+    """腾讯指数日线 {date: close}；800 根够算 250 日分位。"""
+    sym = "sh" + code
+    for host in ("https://ifzq.gtimg.cn", "https://web.ifzq.gtimg.cn"):
+        try:
+            url = f"{host}/appstock/app/fqkline/get?param={sym},day,,,800,qfq"
+            obj = json.loads(_get(url, "https://gu.qq.com/"))
+            node = (obj.get("data") or {}).get(sym) or {}
+            ks = node.get("day") or node.get("qfqday") or []
+            out = {str(x[0])[:10]: float(x[2]) for x in ks if len(x) > 2}
+            out = {k: v for k, v in out.items() if beg <= k <= end}
+            if out:
+                return out
+        except Exception:
+            continue
+    raise RuntimeError("腾讯指数日线无返回")
+
+
+def _spot_sina(code, beg, end):
+    """新浪快照：只有最新一根，最后兜底（分位样本会不足，标 partial）。"""
+    url = "https://hq.sinajs.cn/list=sh" + code
+    req = urllib.request.Request(url, headers={"User-Agent": UA,
+                                              "Referer": "https://finance.sina.com.cn/"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        txt = r.read().decode("gbk", "replace")
+    f = txt.split('"')[1].split(",")
+    c = float(f[3])
+    if c <= 0:
+        raise RuntimeError("快照无价")
+    return {f[30]: c}
+
+
+SPOT_SOURCES = (("东财", _spot_em), ("腾讯", _spot_tencent), ("新浪", _spot_sina))
+
+
+def _spot(code, beg, end):
+    """现货指数日线：东财 → 腾讯 → 新浪快照。返回 ({date: close}, 源名)。"""
+    for name, fn in SPOT_SOURCES:
+        try:
+            m = fn(code, beg, end)
+        except Exception as e:
+            _ERRS.add("%s指数(%s)" % (name, type(e).__name__))
+            continue
+        if m:
+            return m, name
+        _ERRS.add("%s指数:空" % name)
+    raise RuntimeError("现货指数取数失败")
 
 
 def _pct(vals, v):
@@ -95,7 +161,7 @@ def _pct(vals, v):
 
 def build():
     months = _months()
-    rows, asof = [], ""
+    rows, asof, srcs, partial = [], "", set(), False
     for prod, (label, code, mult) in SPEC.items():
         best = {}
         for (yy, mm) in months:
@@ -109,7 +175,8 @@ def build():
         if not best:
             continue
         dates = sorted(best)
-        spot = _spot(code, dates[0].replace("-", ""), dates[-1].replace("-", ""))
+        spot, sname = _spot(code, dates[0], dates[-1])
+        srcs.add(sname)
         series = []
         for d in dates:
             s = spot.get(d)
@@ -124,15 +191,20 @@ def build():
         yy, mm = 2000 + int(sym[-4:-2]), int(sym[-2:])
         days = max((_third_friday(yy, mm) - date.fromisoformat(d)).days, 1)
         hist = [x[4] for x in series[-WINDOW:]]
+        # 分位至少要有 60 个样本才可信；只拿到一根快照就别硬算成 100%
+        pct = _pct(hist, rate) if len(hist) >= 60 else None
+        if pct is None:
+            partial = True
         rows.append({
             "prod": prod, "label": label, "contract": sym,
             "fut": round(c, 2), "spot": round(s, 2), "rate": round(rate, 3),
             "ann": round(rate * 365.0 / days, 2), "days": days,
-            "pct": _pct(hist, rate), "n": len(hist),
+            "pct": pct, "n": len(hist),
         })
     if not rows:
-        raise RuntimeError("期货基差取数失败（新浪接口无返回）")
+        raise RuntimeError("期货基差取数失败（%s）" % ("; ".join(sorted(_ERRS)[:6]) or "新浪接口无返回"))
     return {"asof": asof, "window": WINDOW, "rows": rows,
+            "src": "+".join(sorted(srcs)), "partial": partial,
             "generated": datetime.now(TZ).strftime("%Y-%m-%d %H:%M")}
 
 
@@ -156,5 +228,5 @@ def html(b):
 <div class="sub" style="margin-top:6px">负=贴水（期货比现货便宜）。贴水越深＝对冲盘越拥挤、悲观越贵，这是「拥挤度坐标」，不是方向信号：2019–2021 IC 长期深贴水，中证500 照样涨。</div>
 </div>
 <div class="grid">{cards}</div>
-<div class="sub">口径：主力合约按每日持仓量最大者拼接（不是连续合约），基差率=（期货收盘−现货）/现货；年化按距交割自然日折算；分位取近 {b['window']} 个交易日。5–8 月分红季贴水含分红因素，读数天然偏低，别当情绪。数据源：新浪期货 + 东财指数。</div>
+<div class="sub">口径：主力合约按每日持仓量最大者拼接（不是连续合约），基差率=（期货收盘−现货）/现货；年化按距交割自然日折算；分位取近 {b['window']} 个交易日。5–8 月分红季贴水含分红因素，读数天然偏低，别当情绪。数据源：新浪期货 + {b.get('src') or '东财'}指数{'；现货历史不足，分位未算' if b.get('partial') else ''}。</div>
 """
