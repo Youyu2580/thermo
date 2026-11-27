@@ -522,20 +522,24 @@ def main():
         "today": today,
     }
     os.makedirs("site", exist_ok=True)
-    if daily_block:
-        try:
-            payload["daily"] = daily_block.build(mdate)
-        except Exception as e:  # noqa
-            print(f"[warn] 每日体检取数失败: {e}")
+    # 基差放最前面：它只依赖新浪期货 + 东财指数日线，不依赖 daily。
+    # 放到 daily 之后跑，会在「全市场 5500 只快照」把东财/IP 配额用掉之后再打东财，容易被限流。
     if basis_block:
         try:
             payload["basis"] = basis_block.build()
         except Exception as e:  # noqa
             print(f"[warn] 期指基差取数失败: {e}")
-            prev = (prev_payload().get("basis") or {})
+            prev = dict(prev_payload().get("basis") or {})
             if prev.get("rows"):
+                prev["stale"] = True
+                prev["err"] = f"{type(e).__name__}: {e}"[:300]
                 payload["basis"] = prev
                 print("[warn] 期指基差沿用上次数据")
+    if daily_block:
+        try:
+            payload["daily"] = daily_block.build(mdate)
+        except Exception as e:  # noqa
+            print(f"[warn] 每日体检取数失败: {e}")
     if nine_block:
         try:
             payload["nine"] = nine_block.build(payload)
@@ -644,7 +648,6 @@ def render(p):
     lam = {"def": "#2fd47a", "off": "#ff6b6b", "mix": "#f0b429"}[tone]
     label = {"def": "红利 / 防御占优", "off": "进攻板块占优", "mix": "方向不明 · 降仓观望"}[tone]
     rs_d = svg_path(p["rs_series"])
-    basis_html = basis_block.html(p.get("basis") or {}) if basis_block else ""
     cards_html = top_cards(p)
     vchart = val_chart(p.get("val") or {})
     try:
@@ -661,6 +664,14 @@ def render(p):
     if md and md != p.get("date"):
         lag_html = (f'<div class="alert">⚠ 本页主数据是 <b>{p.get("date")}</b>，最近交易日 <b>{md}</b> 已有收盘'
                     f'——结论是按旧日期算的，今天别照着做。</div>')
+    # 基差块沿用旧值时也要刺眼：贴水/升水是可交易读数，悄悄停在上一周会把人骗反
+    basis_html = basis_block.html(p.get("basis") or {}) if basis_block else ""
+    bb = p.get("basis") or {}
+    if bb.get("rows") and bb.get("asof") and p.get("date") and bb["asof"] != p["date"]:
+        why = bb.get("err") or "云端没取到当天数据"
+        basis_html = (f'<div class="alert">⚠ 期指基差停在 <b>{bb["asof"]}</b>（本页主数据 {p["date"]}）'
+                      f'——下面这张卡片是旧值，当天的贴水/升水没算出来。原因：{why}</div>'
+                      + basis_html)
     lag_note = ""
     ma_d = svg_path(p["rs_ma_series"])
     lo = min(p["rs_series"]); hi = max(p["rs_series"])
